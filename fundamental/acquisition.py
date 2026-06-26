@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import queue
 import threading
-import time
 from collections.abc import Callable
 from pathlib import Path
 
+from DeviceInterface.ads1299_protocol import ADS1299StreamParser, SAMPLE_RATE_HZ
 from fundamental import csv_writer
 from fundamental.messages import (
-    CHANNEL_COUNT,
     DEFAULT_MAX_FRAMES_PER_BATCH,
     AcquisitionState,
     SampleBatch,
@@ -29,23 +28,6 @@ except ImportError:  # pragma: no cover - depends on local runtime
 LogSink = Callable[[str], None]
 
 
-def parse_serial_frame(raw_line: bytes) -> tuple[float, ...] | None:
-    """Parse one UTF-8 serial line into six numeric channel values."""
-
-    line = raw_line.decode("utf-8", errors="ignore").strip()
-    if not line:
-        return None
-
-    parts = [item.strip() for item in line.split(",") if item.strip() != ""]
-    if len(parts) != CHANNEL_COUNT:
-        return None
-
-    try:
-        return tuple(float(int(item)) for item in parts)
-    except ValueError:
-        return None
-
-
 class SerialWorker(threading.Thread):
     """Read serial frames in the background and publish sample batches."""
 
@@ -56,6 +38,7 @@ class SerialWorker(threading.Thread):
         event_queue: queue.Queue[WorkerEvent],
         stop_event: threading.Event,
         timestamp_offset_s: float = 0.0,
+        expected_counter: int | None = None,
         max_frames_per_batch: int = DEFAULT_MAX_FRAMES_PER_BATCH,
     ) -> None:
         super().__init__(name="SerialWorker", daemon=True)
@@ -64,7 +47,11 @@ class SerialWorker(threading.Thread):
         self.event_queue = event_queue
         self.stop_event = stop_event
         self.timestamp_offset_s = timestamp_offset_s
+        self.expected_counter = expected_counter
         self.max_frames_per_batch = max(1, int(max_frames_per_batch))
+        self._counter_origin: int | None = None
+        self._timestamp_origin_s = timestamp_offset_s
+        self._last_timestamp_s = timestamp_offset_s
 
     def run(self) -> None:
         if serial is None:
@@ -82,17 +69,21 @@ class SerialWorker(threading.Thread):
             serial_handle = serial.Serial(
                 self.config.port,
                 self.config.baud_rate,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
                 timeout=self.config.timeout_s,
             )
             serial_handle.reset_input_buffer()
             self.event_queue.put(WorkerEvent("log", f"Opened serial port {self.config.display_text()}"))
 
-            start_time = time.perf_counter()
+            parser = ADS1299StreamParser()
+            parser.expected_counter = self.expected_counter
             frames: list[SampleFrame] = []
-            malformed_count = 0
+            logged_skipped_bytes = 0
             while not self.stop_event.is_set():
                 try:
-                    raw_line = serial_handle.readline()
+                    chunk = serial_handle.read(512)
                 except serial.SerialException as exc:
                     self.event_queue.put(WorkerEvent("error", f"Serial read failed: {exc}"))
                     return
@@ -100,23 +91,40 @@ class SerialWorker(threading.Thread):
                     self.event_queue.put(WorkerEvent("error", f"Serial device error: {exc}"))
                     return
 
-                if not raw_line:
+                if not chunk:
                     self._flush(frames)
                     continue
 
-                values = parse_serial_frame(raw_line)
-                if values is None:
-                    malformed_count += 1
-                    if malformed_count % 200 == 0:
-                        self.event_queue.put(
-                            WorkerEvent("log", f"Ignored {malformed_count} malformed serial lines.")
+                parsed_frames = parser.feed(chunk)
+                if parser.skipped_bytes - logged_skipped_bytes >= 256:
+                    logged_skipped_bytes = parser.skipped_bytes
+                    self.event_queue.put(
+                        WorkerEvent(
+                            "log",
+                            f"Skipped {parser.skipped_bytes} bytes while resynchronizing serial frames.",
                         )
-                    continue
+                    )
 
-                timestamp = self.timestamp_offset_s + (time.perf_counter() - start_time)
-                frames.append(SampleFrame(timestamp, values))
-                if len(frames) >= self.max_frames_per_batch:
-                    self._flush(frames)
+                for parsed_frame in parsed_frames:
+                    if parsed_frame.dropped_frames_before:
+                        self.event_queue.put(
+                            WorkerEvent(
+                                "log",
+                                "Frame counter discontinuity before "
+                                f"{parsed_frame.counter}: dropped={parsed_frame.dropped_frames_before}.",
+                            )
+                        )
+                    timestamp = self._timestamp_for_counter(parsed_frame.counter)
+                    frames.append(
+                        SampleFrame(
+                            time_s=timestamp,
+                            counter=parsed_frame.counter,
+                            dropped_frames_before=parsed_frame.dropped_frames_before,
+                            values=parsed_frame.channels_code,
+                        )
+                    )
+                    if len(frames) >= self.max_frames_per_batch:
+                        self._flush(frames)
         except serial.SerialException as exc:
             self.event_queue.put(WorkerEvent("error", f"Failed to open serial port: {exc}"))
         except OSError as exc:
@@ -129,6 +137,24 @@ class SerialWorker(threading.Thread):
             return
         self.data_queue.put(SampleBatch(tuple(frames)))
         frames.clear()
+
+    def _timestamp_for_counter(self, counter: int) -> float:
+        if self._counter_origin is None:
+            if self.expected_counter is None:
+                self._counter_origin = counter
+            else:
+                self._counter_origin = self.expected_counter - 1
+            self._timestamp_origin_s = self.timestamp_offset_s
+
+        elapsed_samples = counter - self._counter_origin
+        if elapsed_samples < 0:
+            self._counter_origin = counter
+            self._timestamp_origin_s = self._last_timestamp_s + 1.0 / SAMPLE_RATE_HZ
+            elapsed_samples = 0
+
+        timestamp = self._timestamp_origin_s + elapsed_samples / SAMPLE_RATE_HZ
+        self._last_timestamp_s = max(self._last_timestamp_s, timestamp)
+        return timestamp
 
     def _close_handle(self, serial_handle) -> None:
         if serial_handle is None:
@@ -175,10 +201,13 @@ class AcquisitionController:
             return "Acquisition is already running."
 
         timestamp_offset = self.buffer.latest_time_s
+        expected_counter = None
         if self.state == AcquisitionState.STOPPED:
             self.buffer.reset()
             timestamp_offset = 0.0
             self.last_save_path = str(csv_writer.default_capture_path())
+        elif self.buffer.frames:
+            expected_counter = self.buffer.frames[-1].counter + 1
 
         self._clear_queues()
         self.stop_event = threading.Event()
@@ -188,6 +217,7 @@ class AcquisitionController:
             event_queue=self.event_queue,
             stop_event=self.stop_event,
             timestamp_offset_s=timestamp_offset,
+            expected_counter=expected_counter,
         )
         self.worker.start()
         self.state = AcquisitionState.RUNNING

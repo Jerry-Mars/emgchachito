@@ -6,13 +6,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
 
+from DeviceInterface.ads1299_protocol import CHANNEL_COUNT
 
-CHANNEL_COUNT = 6
 DEFAULT_SERIAL_PORT = "COM5"
-DEFAULT_BAUD_RATE = 115200
+DEFAULT_BAUD_RATE = 921600
 DEFAULT_SERIAL_TIMEOUT = 0.05
 DEFAULT_PLOT_WINDOW_SECONDS = 5.0
-DEFAULT_PLOT_BUFFER_SIZE = 4000
+DEFAULT_PLOT_BUFFER_SIZE = 20000
 DEFAULT_MAX_FRAMES_PER_BATCH = 64
 
 
@@ -48,7 +48,9 @@ class SampleFrame:
     """One timestamped multi-channel sample."""
 
     time_s: float
-    values: tuple[float, ...]
+    counter: int
+    dropped_frames_before: int
+    values: tuple[int, ...]
 
 
 @dataclass(frozen=True)

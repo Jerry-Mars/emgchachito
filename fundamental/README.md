@@ -57,15 +57,20 @@ only lifecycle, command routing, window routing, and logs.
 
 ## Serial Protocol
 
-Each sample is expected as one UTF-8 line with six comma-separated integer
-values:
+The current hardware uses the ADS1299 binary host-frame protocol documented in
+`DeviceInterface/EMG_HOST_FRAME_PROTOCOL.md`:
 
 ```text
-123,456,789,321,654,987
+0xAA
+8 * 24-bit signed channel codes, MSB first
+uint64 frame_counter, big-endian
+0xBB
 ```
+
+Default serial settings are `921600 8N1`, no parity, no flow control.
 
 CSV output uses:
 
 ```text
-time_s,ch1,ch2,ch3,ch4,ch5,ch6
+time_s,frame_counter,dropped_frames_before,ch1_code,ch2_code,ch3_code,ch4_code,ch5_code,ch6_code,ch7_code,ch8_code
 ```

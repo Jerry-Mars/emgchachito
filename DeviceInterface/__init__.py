@@ -1,0 +1,1 @@
+"""Hardware-facing protocol helpers."""

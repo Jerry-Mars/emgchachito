@@ -20,8 +20,22 @@ def save_frames(path: str | Path, frames: list[SampleFrame]) -> tuple[Path, int]
 
     with output_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow(["time_s", *[f"ch{i}" for i in range(1, CHANNEL_COUNT + 1)]])
+        writer.writerow(
+            [
+                "time_s",
+                "frame_counter",
+                "dropped_frames_before",
+                *[f"ch{i}_code" for i in range(1, CHANNEL_COUNT + 1)],
+            ]
+        )
         for frame in frames:
-            writer.writerow([f"{frame.time_s:.6f}", *[f"{value:.6f}" for value in frame.values]])
+            writer.writerow(
+                [
+                    f"{frame.time_s:.6f}",
+                    frame.counter,
+                    frame.dropped_frames_before,
+                    *[int(value) for value in frame.values],
+                ]
+            )
 
     return output_path, len(frames)

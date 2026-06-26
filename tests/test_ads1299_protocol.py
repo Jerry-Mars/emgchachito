@@ -1,0 +1,141 @@
+from __future__ import annotations
+
+import tempfile
+import queue
+import threading
+import unittest
+from pathlib import Path
+
+from DeviceInterface.ads1299_protocol import ADS1299StreamParser, int24_be_to_signed, parse_frame
+from fundamental.acquisition import SerialWorker
+from fundamental.csv_writer import save_frames
+from fundamental.messages import (
+    CHANNEL_COUNT,
+    DEFAULT_BAUD_RATE,
+    SampleBatch,
+    SampleFrame,
+    SerialConfig,
+)
+from fundamental.signal_buffer import SignalBuffer
+
+
+VALUES = (1, -1, 8388607, -8388608, 123456, -123456, 0, 42)
+
+
+def int24_bytes(value: int) -> bytes:
+    if value < 0:
+        value = (1 << 24) + value
+    return value.to_bytes(3, "big")
+
+
+def make_frame(counter: int, values: tuple[int, ...] = VALUES) -> bytes:
+    payload = bytearray([0xAA])
+    for value in values:
+        payload.extend(int24_bytes(value))
+    payload.extend(counter.to_bytes(8, "big"))
+    payload.append(0xBB)
+    return bytes(payload)
+
+
+class ADS1299ProtocolTests(unittest.TestCase):
+    def test_int24_conversion(self) -> None:
+        self.assertEqual(int24_be_to_signed(0x00, 0x00, 0x01), 1)
+        self.assertEqual(int24_be_to_signed(0x7F, 0xFF, 0xFF), 8388607)
+        self.assertEqual(int24_be_to_signed(0x80, 0x00, 0x00), -8388608)
+        self.assertEqual(int24_be_to_signed(0xFF, 0xFF, 0xFF), -1)
+
+    def test_parse_fixed_frame(self) -> None:
+        parsed = parse_frame(make_frame(10))
+        self.assertEqual(parsed.counter, 10)
+        self.assertEqual(parsed.channels_code, VALUES)
+
+    def test_stream_resync_and_counter_gap(self) -> None:
+        parser = ADS1299StreamParser()
+        self.assertEqual(parser.feed(b"noise" + make_frame(10)[:12]), [])
+
+        frames = parser.feed(make_frame(10)[12:] + make_frame(11) + make_frame(14))
+
+        self.assertEqual([frame.counter for frame in frames], [10, 11, 14])
+        self.assertEqual([frame.dropped_frames_before for frame in frames], [0, 0, 2])
+        self.assertEqual(parser.skipped_bytes, 5)
+
+    def test_counter_regression_marks_unknown_discontinuity(self) -> None:
+        parser = ADS1299StreamParser()
+        frames = parser.feed(make_frame(20) + make_frame(18))
+        self.assertEqual([frame.dropped_frames_before for frame in frames], [0, -1])
+
+    def test_bad_tail_resyncs_to_next_valid_frame(self) -> None:
+        bad_tail = bytearray(make_frame(30))
+        bad_tail[-1] = 0x00
+        parser = ADS1299StreamParser()
+
+        frames = parser.feed(bytes(bad_tail) + make_frame(31))
+
+        self.assertEqual([frame.counter for frame in frames], [31])
+        self.assertEqual(parser.bad_tail_count, 1)
+
+
+class AcquisitionDataContractTests(unittest.TestCase):
+    def test_defaults_match_hardware_protocol(self) -> None:
+        self.assertEqual(CHANNEL_COUNT, 8)
+        self.assertEqual(DEFAULT_BAUD_RATE, 921600)
+
+    def test_buffer_and_csv_keep_counter_and_raw_codes(self) -> None:
+        buffer = SignalBuffer(plot_buffer_size=4)
+        count = buffer.append_batch(
+            SampleBatch(
+                (
+                    SampleFrame(0.0, 10, 0, VALUES),
+                    SampleFrame(0.1, 11, 0, VALUES),
+                )
+            )
+        )
+
+        self.assertEqual(count, 2)
+        self.assertEqual(buffer.frame_count, 2)
+        self.assertEqual(buffer.latest_values[1], -1.0)
+        self.assertIsNotNone(buffer.get_plot_window(1.0))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path, rows = save_frames(Path(tmp) / "capture.csv", buffer.snapshot_frames())
+            lines = path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(rows, 2)
+        self.assertEqual(
+            lines[0],
+            "time_s,frame_counter,dropped_frames_before,"
+            "ch1_code,ch2_code,ch3_code,ch4_code,ch5_code,ch6_code,ch7_code,ch8_code",
+        )
+        self.assertEqual(
+            lines[1],
+            "0.000000,10,0,1,-1,8388607,-8388608,123456,-123456,0,42",
+        )
+
+    def test_worker_timestamps_follow_device_counter(self) -> None:
+        worker = SerialWorker(
+            config=SerialConfig(),
+            data_queue=queue.Queue(),
+            event_queue=queue.Queue(),
+            stop_event=threading.Event(),
+        )
+
+        self.assertEqual(worker._timestamp_for_counter(100), 0.0)
+        self.assertEqual(worker._timestamp_for_counter(101), 0.001)
+        self.assertEqual(worker._timestamp_for_counter(104), 0.004)
+
+    def test_resumed_worker_timestamps_continue_after_previous_counter(self) -> None:
+        worker = SerialWorker(
+            config=SerialConfig(),
+            data_queue=queue.Queue(),
+            event_queue=queue.Queue(),
+            stop_event=threading.Event(),
+            timestamp_offset_s=2.0,
+            expected_counter=51,
+        )
+
+        self.assertEqual(worker._timestamp_for_counter(51), 2.001)
+        self.assertEqual(worker._timestamp_for_counter(54), 2.004)
+
+
+if __name__ == "__main__":
+    unittest.main()
