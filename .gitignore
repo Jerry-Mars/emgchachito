@@ -10,7 +10,14 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
+capture/
 captures/
+*.csv
+*.tsv
+*.npy
+*.npz
+*.bin
+*.dat
 
 .DS_Store
 Thumbs.db
