@@ -121,6 +121,7 @@ class SerialWorker(threading.Thread):
                             counter=parsed_frame.counter,
                             dropped_frames_before=parsed_frame.dropped_frames_before,
                             values=parsed_frame.channels_code,
+                            emg_channel_count=parsed_frame.emg_channel_count,
                         )
                     )
                     if len(frames) >= self.max_frames_per_batch:

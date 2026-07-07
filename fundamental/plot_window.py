@@ -189,14 +189,16 @@ def _refresh_status(controller: AcquisitionController) -> None:
         return
 
     state = controller.state.value.upper()
+    active_channel_count = controller.buffer.active_channel_count
     dpg.set_value(
         STATUS_TEXT_TAG,
-        f"State: {state} | Samples: {controller.buffer.frame_count}",
+        f"State: {state} | Samples: {controller.buffer.frame_count} | Channels: {active_channel_count or '-'}",
     )
     dpg.set_value(CONFIG_TEXT_TAG, f"Serial: {controller.config.display_text()}")
+    latest_values = controller.buffer.latest_values[:active_channel_count]
     latest = "  ".join(
-        f"CH{index + 1}: {value:.1f}" for index, value in enumerate(controller.buffer.latest_values)
-    )
+        f"CH{index + 1}: {value:.1f}" for index, value in enumerate(latest_values)
+    ) or "-"
     dpg.set_value(LATEST_TEXT_TAG, f"Latest: {latest}")
     _sync_save_path(controller)
 
@@ -212,17 +214,26 @@ def _refresh_plot(controller: AcquisitionController) -> None:
         return
 
     window_seconds = float(dpg.get_value(WINDOW_SECONDS_TAG))
+    active_channel_count = controller.buffer.active_channel_count
     window = controller.buffer.get_plot_window(window_seconds)
     if window is None:
         for channel_index in range(CHANNEL_COUNT):
-            dpg.set_value(_series_tag(channel_index), [[], []])
+            series_tag = _series_tag(channel_index)
+            dpg.set_value(series_tag, [[], []])
+            _configure_if_exists(series_tag, show=channel_index < active_channel_count)
         dpg.set_axis_limits(X_AXIS_TAG, 0.0, window_seconds)
         dpg.set_axis_limits(Y_AXIS_TAG, -1.0, 1.0)
         return
 
     x_min, x_max, window_x, channel_windows, y_min, y_max = window
-    for channel_index, window_y in enumerate(channel_windows):
-        dpg.set_value(_series_tag(channel_index), [window_x, window_y])
+    for channel_index in range(CHANNEL_COUNT):
+        series_tag = _series_tag(channel_index)
+        if channel_index < len(channel_windows):
+            dpg.set_value(series_tag, [window_x, channel_windows[channel_index]])
+            _configure_if_exists(series_tag, show=True)
+        else:
+            dpg.set_value(series_tag, [[], []])
+            _configure_if_exists(series_tag, show=False)
 
     y_span = y_max - y_min
     padding = max(1.0, y_span * 0.05)

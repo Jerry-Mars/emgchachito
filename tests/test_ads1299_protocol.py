@@ -6,7 +6,12 @@ import threading
 import unittest
 from pathlib import Path
 
-from DeviceInterface.ads1299_protocol import ADS1299StreamParser, int24_be_to_signed, parse_frame
+from DeviceInterface.ads1299_protocol import (
+    ADS1299StreamParser,
+    FRAME_LEN,
+    int24_be_to_signed,
+    parse_frame,
+)
 from fundamental.acquisition import SerialWorker
 from fundamental.csv_writer import save_frames
 from fundamental.messages import (
@@ -28,8 +33,8 @@ def int24_bytes(value: int) -> bytes:
     return value.to_bytes(3, "big")
 
 
-def make_frame(counter: int, values: tuple[int, ...] = VALUES) -> bytes:
-    payload = bytearray([0xAA])
+def make_frame(counter: int, values: tuple[int, ...] = VALUES, emg_channel_count: int = 4) -> bytes:
+    payload = bytearray([0xAA, emg_channel_count])
     for value in values:
         payload.extend(int24_bytes(value))
     payload.extend(counter.to_bytes(8, "big"))
@@ -47,7 +52,13 @@ class ADS1299ProtocolTests(unittest.TestCase):
     def test_parse_fixed_frame(self) -> None:
         parsed = parse_frame(make_frame(10))
         self.assertEqual(parsed.counter, 10)
+        self.assertEqual(parsed.emg_channel_count, 4)
         self.assertEqual(parsed.channels_code, VALUES)
+        self.assertEqual(parsed.emg_channels_code, VALUES[:4])
+
+    def test_rejects_invalid_emg_channel_count(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid emg channel count"):
+            parse_frame(make_frame(10, emg_channel_count=0))
 
     def test_stream_resync_and_counter_gap(self) -> None:
         parser = ADS1299StreamParser()
@@ -74,9 +85,18 @@ class ADS1299ProtocolTests(unittest.TestCase):
         self.assertEqual([frame.counter for frame in frames], [31])
         self.assertEqual(parser.bad_tail_count, 1)
 
+    def test_bad_channel_count_resyncs_to_next_valid_frame(self) -> None:
+        parser = ADS1299StreamParser()
+
+        frames = parser.feed(make_frame(30, emg_channel_count=0) + make_frame(31))
+
+        self.assertEqual([frame.counter for frame in frames], [31])
+        self.assertEqual(parser.bad_channel_count, 1)
+
 
 class AcquisitionDataContractTests(unittest.TestCase):
     def test_defaults_match_hardware_protocol(self) -> None:
+        self.assertEqual(FRAME_LEN, 35)
         self.assertEqual(CHANNEL_COUNT, 8)
         self.assertEqual(DEFAULT_BAUD_RATE, 921600)
 
@@ -85,16 +105,20 @@ class AcquisitionDataContractTests(unittest.TestCase):
         count = buffer.append_batch(
             SampleBatch(
                 (
-                    SampleFrame(0.0, 10, 0, VALUES),
-                    SampleFrame(0.1, 11, 0, VALUES),
+                    SampleFrame(0.0, 10, 0, VALUES, emg_channel_count=4),
+                    SampleFrame(0.1, 11, 0, VALUES, emg_channel_count=4),
                 )
             )
         )
 
         self.assertEqual(count, 2)
         self.assertEqual(buffer.frame_count, 2)
+        self.assertEqual(buffer.active_channel_count, 4)
         self.assertEqual(buffer.latest_values[1], -1.0)
-        self.assertIsNotNone(buffer.get_plot_window(1.0))
+        window = buffer.get_plot_window(1.0)
+        self.assertIsNotNone(window)
+        assert window is not None
+        self.assertEqual(len(window[3]), 4)
 
         with tempfile.TemporaryDirectory() as tmp:
             path, rows = save_frames(Path(tmp) / "capture.csv", buffer.snapshot_frames())
@@ -104,11 +128,12 @@ class AcquisitionDataContractTests(unittest.TestCase):
         self.assertEqual(
             lines[0],
             "time_s,frame_counter,dropped_frames_before,"
-            "ch1_code,ch2_code,ch3_code,ch4_code,ch5_code,ch6_code,ch7_code,ch8_code",
+            "emg_channel_count,ch1_code,ch2_code,ch3_code,ch4_code,"
+            "ch5_code,ch6_code,ch7_code,ch8_code",
         )
         self.assertEqual(
             lines[1],
-            "0.000000,10,0,1,-1,8388607,-8388608,123456,-123456,0,42",
+            "0.000000,10,0,4,1,-1,8388607,-8388608,123456,-123456,0,42",
         )
 
     def test_worker_timestamps_follow_device_counter(self) -> None:

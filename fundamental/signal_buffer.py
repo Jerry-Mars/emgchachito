@@ -16,6 +16,7 @@ class SignalBuffer:
         self.channels = [deque(maxlen=plot_buffer_size) for _ in range(CHANNEL_COUNT)]
         self.frames: list[SampleFrame] = []
         self.latest_values = [0.0 for _ in range(CHANNEL_COUNT)]
+        self.emg_channel_count = 0
 
     @property
     def frame_count(self) -> int:
@@ -27,18 +28,26 @@ class SignalBuffer:
             return 0.0
         return self.frames[-1].time_s
 
+    @property
+    def active_channel_count(self) -> int:
+        return self.emg_channel_count if self.frames else 0
+
     def reset(self) -> None:
         self.timestamps = deque(maxlen=self.plot_buffer_size)
         self.channels = [deque(maxlen=self.plot_buffer_size) for _ in range(CHANNEL_COUNT)]
         self.frames = []
         self.latest_values = [0.0 for _ in range(CHANNEL_COUNT)]
+        self.emg_channel_count = 0
 
     def append_batch(self, batch: SampleBatch) -> int:
         count = 0
         for frame in batch.frames:
             if len(frame.values) != CHANNEL_COUNT:
                 continue
+            if frame.emg_channel_count < 1 or frame.emg_channel_count > CHANNEL_COUNT:
+                continue
             self.frames.append(frame)
+            self.emg_channel_count = frame.emg_channel_count
             self.timestamps.append(frame.time_s)
             for index, value in enumerate(frame.values):
                 numeric_value = float(value)
@@ -69,10 +78,14 @@ class SignalBuffer:
         if len(window_x) < 2:
             return None
 
+        active_channel_count = self.active_channel_count
+        if active_channel_count < 1:
+            return None
+
         channel_windows: list[list[float]] = []
         y_min = float("inf")
         y_max = float("-inf")
-        for channel in self.channels:
+        for channel in self.channels[:active_channel_count]:
             window_y = list(channel)[start_index:]
             if not window_y:
                 return None

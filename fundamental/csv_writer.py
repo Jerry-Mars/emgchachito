@@ -25,6 +25,7 @@ def save_frames(path: str | Path, frames: list[SampleFrame]) -> tuple[Path, int]
                 "time_s",
                 "frame_counter",
                 "dropped_frames_before",
+                "emg_channel_count",
                 *[f"ch{i}_code" for i in range(1, CHANNEL_COUNT + 1)],
             ]
         )
@@ -34,6 +35,7 @@ def save_frames(path: str | Path, frames: list[SampleFrame]) -> tuple[Path, int]
                     f"{frame.time_s:.6f}",
                     frame.counter,
                     frame.dropped_frames_before,
+                    frame.emg_channel_count,
                     *[int(value) for value in frame.values],
                 ]
             )

@@ -62,6 +62,7 @@ The current hardware uses the ADS1299 binary host-frame protocol documented in
 
 ```text
 0xAA
+uint8 emg_channel_count
 8 * 24-bit signed channel codes, MSB first
 uint64 frame_counter, big-endian
 0xBB
@@ -72,5 +73,5 @@ Default serial settings are `921600 8N1`, no parity, no flow control.
 CSV output uses:
 
 ```text
-time_s,frame_counter,dropped_frames_before,ch1_code,ch2_code,ch3_code,ch4_code,ch5_code,ch6_code,ch7_code,ch8_code
+time_s,frame_counter,dropped_frames_before,emg_channel_count,ch1_code,ch2_code,ch3_code,ch4_code,ch5_code,ch6_code,ch7_code,ch8_code
 ```

@@ -51,6 +51,7 @@ class SampleFrame:
     counter: int
     dropped_frames_before: int
     values: tuple[int, ...]
+    emg_channel_count: int = CHANNEL_COUNT
 
 
 @dataclass(frozen=True)
