@@ -1,4 +1,4 @@
-"""Live raw serial plot window and acquisition commands."""
+"""Live raw serial plot window."""
 
 from __future__ import annotations
 
@@ -10,23 +10,16 @@ from fundamental.commands import CommandSpec
 from fundamental.messages import (
     CHANNEL_COUNT,
     DEFAULT_PLOT_WINDOW_SECONDS,
-    AcquisitionState,
 )
 from fundamental.window_manager import ManagedWindow
 
 
 PLOT_WINDOW_TAG = "fundamental.plot.window"
 STATUS_TEXT_TAG = "fundamental.plot.status"
-CONFIG_TEXT_TAG = "fundamental.plot.config"
 LATEST_TEXT_TAG = "fundamental.plot.latest"
-SAVE_PATH_INPUT_TAG = "fundamental.plot.save_path"
 WINDOW_SECONDS_TAG = "fundamental.plot.window_seconds"
 X_AXIS_TAG = "fundamental.plot.x_axis"
 Y_AXIS_TAG = "fundamental.plot.y_axis"
-START_BUTTON_TAG = "fundamental.plot.start"
-PAUSE_BUTTON_TAG = "fundamental.plot.pause"
-STOP_BUTTON_TAG = "fundamental.plot.stop"
-SAVE_BUTTON_TAG = "fundamental.plot.save"
 
 CHANNEL_COLORS = [
     (231, 76, 60),
@@ -56,7 +49,6 @@ def register(app: FundamentalApp, controller: AcquisitionController) -> None:
         )
     )
     app.register_frame_callback(lambda frame_app: _on_frame(frame_app, controller))
-    app.register_shutdown_callback(lambda _frame_app: controller.shutdown())
 
 
 def _open_window(app: FundamentalApp, controller: AcquisitionController) -> str | None:
@@ -66,34 +58,7 @@ def _open_window(app: FundamentalApp, controller: AcquisitionController) -> str 
     return None
 
 
-def _start(controller: AcquisitionController) -> str:
-    result = controller.start()
-    _sync_save_path(controller, force=True)
-    _refresh_status(controller)
-    return result
-
-
-def _pause(controller: AcquisitionController) -> str:
-    result = controller.pause()
-    _refresh_status(controller)
-    return result
-
-
-def _stop(controller: AcquisitionController) -> str:
-    result = controller.stop()
-    _refresh_status(controller)
-    return result
-
-
-def _save(controller: AcquisitionController) -> str:
-    path = _save_path_from_window(controller)
-    result = controller.save(path)
-    _sync_save_path(controller, force=True)
-    _refresh_status(controller)
-    return result
-
-
-def _build_window(app: FundamentalApp, controller: AcquisitionController) -> None:
+def _build_window(_app: FundamentalApp, controller: AcquisitionController) -> None:
     with dpg.window(
         label="Serial Plot",
         tag=PLOT_WINDOW_TAG,
@@ -102,39 +67,6 @@ def _build_window(app: FundamentalApp, controller: AcquisitionController) -> Non
         height=640,
         pos=(80, 80),
     ):
-        with dpg.group(horizontal=True):
-            dpg.add_button(
-                label="Start",
-                tag=START_BUTTON_TAG,
-                width=90,
-                callback=lambda *_: _run_action(app, lambda: _start(controller)),
-            )
-            dpg.add_button(
-                label="Pause",
-                tag=PAUSE_BUTTON_TAG,
-                width=90,
-                callback=lambda *_: _run_action(app, lambda: _pause(controller)),
-            )
-            dpg.add_button(
-                label="Stop",
-                tag=STOP_BUTTON_TAG,
-                width=90,
-                callback=lambda *_: _run_action(app, lambda: _stop(controller)),
-            )
-            dpg.add_button(
-                label="Save",
-                tag=SAVE_BUTTON_TAG,
-                width=90,
-                callback=lambda *_: _run_action(app, lambda: _save(controller)),
-            )
-
-        dpg.add_spacer(height=8)
-        dpg.add_input_text(
-            tag=SAVE_PATH_INPUT_TAG,
-            label="Save Path",
-            default_value=controller.last_save_path,
-            width=520,
-        )
         dpg.add_slider_float(
             tag=WINDOW_SECONDS_TAG,
             label="Window (s)",
@@ -146,7 +78,6 @@ def _build_window(app: FundamentalApp, controller: AcquisitionController) -> Non
         )
         dpg.add_spacer(height=8)
         dpg.add_text("", tag=STATUS_TEXT_TAG)
-        dpg.add_text("", tag=CONFIG_TEXT_TAG)
         dpg.add_text("", tag=LATEST_TEXT_TAG)
         dpg.add_spacer(height=10)
 
@@ -168,20 +99,12 @@ def _build_window(app: FundamentalApp, controller: AcquisitionController) -> Non
     _refresh_status(controller)
 
 
-def _on_frame(app: FundamentalApp, controller: AcquisitionController) -> None:
-    appended = controller.drain_queues(app.log)
+def _on_frame(_app: FundamentalApp, controller: AcquisitionController) -> None:
     if not dpg.does_item_exist(PLOT_WINDOW_TAG):
         return
 
     _refresh_status(controller)
-    if appended:
-        _refresh_plot(controller)
-
-
-def _run_action(app: FundamentalApp, action) -> None:
-    result = action()
-    if result:
-        app.log(result)
+    _refresh_plot(controller)
 
 
 def _refresh_status(controller: AcquisitionController) -> None:
@@ -194,19 +117,11 @@ def _refresh_status(controller: AcquisitionController) -> None:
         STATUS_TEXT_TAG,
         f"State: {state} | Samples: {controller.buffer.frame_count} | Channels: {active_channel_count or '-'}",
     )
-    dpg.set_value(CONFIG_TEXT_TAG, f"Serial: {controller.config.display_text()}")
     latest_values = controller.buffer.latest_values[:active_channel_count]
     latest = "  ".join(
         f"CH{index + 1}: {value:.1f}" for index, value in enumerate(latest_values)
     ) or "-"
     dpg.set_value(LATEST_TEXT_TAG, f"Latest: {latest}")
-    _sync_save_path(controller)
-
-    running = controller.state == AcquisitionState.RUNNING
-    _configure_if_exists(START_BUTTON_TAG, enabled=not running)
-    _configure_if_exists(PAUSE_BUTTON_TAG, enabled=running)
-    _configure_if_exists(STOP_BUTTON_TAG, enabled=controller.state != AcquisitionState.STOPPED)
-    _configure_if_exists(SAVE_BUTTON_TAG, enabled=not running and controller.buffer.frame_count > 0)
 
 
 def _refresh_plot(controller: AcquisitionController) -> None:
@@ -239,23 +154,6 @@ def _refresh_plot(controller: AcquisitionController) -> None:
     padding = max(1.0, y_span * 0.05)
     dpg.set_axis_limits(X_AXIS_TAG, x_min, max(x_max, x_min + 0.1))
     dpg.set_axis_limits(Y_AXIS_TAG, y_min - padding, y_max + padding)
-
-
-def _save_path_from_window(controller: AcquisitionController) -> str:
-    if dpg.does_item_exist(SAVE_PATH_INPUT_TAG):
-        value = str(dpg.get_value(SAVE_PATH_INPUT_TAG)).strip()
-        if value:
-            return value
-    return controller.last_save_path
-
-
-def _sync_save_path(controller: AcquisitionController, force: bool = False) -> None:
-    if not dpg.does_item_exist(SAVE_PATH_INPUT_TAG):
-        return
-    current_value = str(dpg.get_value(SAVE_PATH_INPUT_TAG)).strip()
-    if current_value and not force:
-        return
-    dpg.set_value(SAVE_PATH_INPUT_TAG, controller.last_save_path)
 
 
 def _configure_if_exists(tag: str, **kwargs) -> None:

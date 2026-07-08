@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import queue
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from DeviceInterface.ads1299_protocol import ADS1299StreamParser, SAMPLE_RATE_HZ
 from fundamental import csv_writer
@@ -239,7 +240,12 @@ class AcquisitionController:
         self.state = AcquisitionState.STOPPED
         return f"Acquisition stopped with {self.buffer.frame_count} samples buffered."
 
-    def save(self, path: str | Path | None = None) -> str:
+    def save(
+        self,
+        path: str | Path | None = None,
+        stimulus_code_for_time: csv_writer.StimulusCodeResolver | None = None,
+        stimulus_log_rows: Sequence[dict[str, Any]] | None = None,
+    ) -> str:
         if self.state == AcquisitionState.RUNNING:
             return "Pause or stop acquisition before saving."
 
@@ -250,8 +256,18 @@ class AcquisitionController:
         save_path = str(path).strip() if path is not None else self.last_save_path
         if not save_path:
             save_path = self.last_save_path
-        output_path, row_count = csv_writer.save_frames(save_path, frames)
+        output_path, row_count = csv_writer.save_frames(
+            save_path,
+            frames,
+            stimulus_code_for_time=stimulus_code_for_time,
+        )
         self.last_save_path = str(output_path)
+        if stimulus_log_rows is not None:
+            log_path, log_rows = csv_writer.save_stimulus_log(
+                csv_writer.stimulus_log_path(output_path),
+                stimulus_log_rows,
+            )
+            return f"Saved {row_count} samples to {output_path} and {log_rows} stimulus events to {log_path}."
         return f"Saved {row_count} samples to {output_path}."
 
     def drain_queues(self, log_sink: LogSink | None = None, max_batches: int = 64) -> int:

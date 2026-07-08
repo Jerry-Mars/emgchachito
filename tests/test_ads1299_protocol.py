@@ -13,7 +13,7 @@ from DeviceInterface.ads1299_protocol import (
     parse_frame,
 )
 from fundamental.acquisition import SerialWorker
-from fundamental.csv_writer import save_frames
+from fundamental.csv_writer import save_frames, save_stimulus_log, stimulus_log_path
 from fundamental.messages import (
     CHANNEL_COUNT,
     DEFAULT_BAUD_RATE,
@@ -22,6 +22,7 @@ from fundamental.messages import (
     SerialConfig,
 )
 from fundamental.signal_buffer import SignalBuffer
+from fundamental.stimulus_model import INVALID_STIMULUS_CODE, StimulusController, StimulusEvent, StimulusState
 
 
 VALUES = (1, -1, 8388607, -8388608, 123456, -123456, 0, 42)
@@ -136,6 +137,36 @@ class AcquisitionDataContractTests(unittest.TestCase):
             "0.000000,10,0,4,1,-1,8388607,-8388608,123456,-123456,0,42",
         )
 
+    def test_labeled_csv_adds_stimulus_code_when_requested(self) -> None:
+        frames = [
+            SampleFrame(0.0, 10, 0, VALUES, emg_channel_count=4),
+            SampleFrame(1.0, 11, 0, VALUES, emg_channel_count=4),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path, rows = save_frames(
+                Path(tmp) / "capture.csv",
+                frames,
+                stimulus_code_for_time=lambda time_s: 1 if time_s < 0.5 else 2,
+            )
+            lines = path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(rows, 2)
+        self.assertEqual(
+            lines[0],
+            "time_s,frame_counter,dropped_frames_before,"
+            "emg_channel_count,stimulus_code,ch1_code,ch2_code,ch3_code,ch4_code,"
+            "ch5_code,ch6_code,ch7_code,ch8_code",
+        )
+        self.assertEqual(
+            lines[1],
+            "0.000000,10,0,4,1,1,-1,8388607,-8388608,123456,-123456,0,42",
+        )
+        self.assertEqual(
+            lines[2],
+            "1.000000,11,0,4,2,1,-1,8388607,-8388608,123456,-123456,0,42",
+        )
+
     def test_worker_timestamps_follow_device_counter(self) -> None:
         worker = SerialWorker(
             config=SerialConfig(),
@@ -160,6 +191,67 @@ class AcquisitionDataContractTests(unittest.TestCase):
 
         self.assertEqual(worker._timestamp_for_counter(51), 2.001)
         self.assertEqual(worker._timestamp_for_counter(54), 2.004)
+
+
+class StimulusContractTests(unittest.TestCase):
+    def test_stimulus_timeline_labels_by_sample_time(self) -> None:
+        stimulus = StimulusController()
+        error = stimulus.set_schedule(
+            [
+                StimulusEvent(1, "rest", 1.0),
+                StimulusEvent(2, "grip", 1.0),
+            ]
+        )
+        self.assertIsNone(error)
+
+        self.assertEqual(stimulus.start(0.0), "Stimulus timeline started.")
+        stimulus.update(1.25)
+
+        self.assertEqual(stimulus.stimulus_code_at(0.5), 1)
+        self.assertEqual(stimulus.stimulus_code_at(1.1), 2)
+        stimulus.update(2.0)
+        self.assertEqual(stimulus.state, StimulusState.STOPPED)
+
+    def test_restart_event_marks_previous_attempt_invalid(self) -> None:
+        stimulus = StimulusController()
+        stimulus.set_schedule([StimulusEvent(2, "grip", 2.0)])
+
+        stimulus.start(0.0)
+        self.assertEqual(stimulus.restart_event(0.4), "Restarted event 1.")
+
+        self.assertEqual(stimulus.stimulus_code_at(0.2), INVALID_STIMULUS_CODE)
+        self.assertEqual(stimulus.stimulus_code_at(0.5), 2)
+        rows = stimulus.event_log_rows()
+        self.assertEqual(rows[0]["status"], "restarted_invalid")
+        self.assertEqual(rows[0]["stimulus_code"], INVALID_STIMULUS_CODE)
+        self.assertEqual(rows[1]["stimulus_code"], 2)
+
+    def test_stimulus_log_sidecar_path_and_rows(self) -> None:
+        rows = [
+            {
+                "event_index": 1,
+                "stimulus_code": 1,
+                "planned_code": 1,
+                "label": "rest",
+                "start_time_s": 0.0,
+                "end_time_s": 1.0,
+                "status": "completed",
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            capture_path = Path(tmp) / "capture.csv"
+            log_path = stimulus_log_path(capture_path)
+            path, row_count = save_stimulus_log(log_path, rows)
+            lines = path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(row_count, 1)
+        self.assertEqual(path.name, "capture.stimulus.csv")
+        self.assertEqual(
+            lines[0],
+            "event_index,stimulus_code,planned_code,label,start_time_s,end_time_s,status",
+        )
+        self.assertEqual(lines[1], "1,1,1,rest,0.000000,1.000000,completed")
 
 
 if __name__ == "__main__":

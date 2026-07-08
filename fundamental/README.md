@@ -1,7 +1,8 @@
 # Fundamental Serial Acquisition
 
 This directory contains the minimal command-driven serial acquisition GUI. It
-only keeps serial configuration, live raw plotting, and CSV saving.
+keeps serial configuration, acquisition control, live raw plotting, stimulus
+timeline labeling, and CSV saving.
 
 ## Run
 
@@ -15,7 +16,9 @@ In the viewport:
 
 - `Ctrl+Shift+P` opens the command palette.
 - Run `serial` to open serial settings.
+- Run `acquisition` to open recording controls.
 - Run `plot` to open live plotting.
+- Run `stimulus` to open the stimulus schedule and experiment timeline.
 - `Esc` closes the active command-opened window.
 - The `Log Output` window is the only default visible tool window and can be
   moved, collapsed, or docked when Dear PyGui docking is available.
@@ -25,14 +28,25 @@ In the viewport:
 The command palette intentionally exposes only window-level commands:
 
 - `serial`: open the serial configuration window.
-- `plot`: open the live raw serial plot.
+- `acquisition`: open start, pause, stop, and save controls.
+- `plot`: open the live raw serial plot only.
+- `stimulus`: open the stimulus schedule and experiment timeline.
 
-Acquisition controls are kept inside the plot window:
+Acquisition controls are kept inside the acquisition window:
 
 - `Start`: start or resume acquisition.
 - `Pause`: pause acquisition and keep buffered samples.
 - `Stop`: stop acquisition and keep buffered samples.
 - `Save`: save buffered samples while paused or stopped.
+
+Stimulus controls use the same acquisition controller:
+
+- `Start`: start acquisition if needed and start the stimulus schedule.
+- `Pause`: pause acquisition and the stimulus timeline; no new samples are stored.
+- `Resume`: resume acquisition and continue the current stimulus event.
+- `Stop`: stop acquisition and close the current stimulus event.
+- `Restart Event`: mark the current event attempt as invalid and restart it.
+- `Save`: save EMG samples with `stimulus_code` plus a `.stimulus.csv` sidecar log.
 
 ## Extension Contract
 
@@ -74,4 +88,16 @@ CSV output uses:
 
 ```text
 time_s,frame_counter,dropped_frames_before,emg_channel_count,ch1_code,ch2_code,ch3_code,ch4_code,ch5_code,ch6_code,ch7_code,ch8_code
+```
+
+Stimulus saves add one sample-aligned numeric column:
+
+```text
+time_s,frame_counter,dropped_frames_before,emg_channel_count,stimulus_code,ch1_code,...
+```
+
+The stimulus sidecar maps numeric codes to labels and actual event intervals:
+
+```text
+event_index,stimulus_code,planned_code,label,start_time_s,end_time_s,status
 ```
