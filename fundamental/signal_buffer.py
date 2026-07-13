@@ -59,6 +59,28 @@ class SignalBuffer:
     def snapshot_frames(self) -> list[SampleFrame]:
         return list(self.frames)
 
+    def get_channel_window(self, channel_index: int, window_seconds: float) -> tuple[list[float], list[float]] | None:
+        if channel_index < 0 or channel_index >= self.active_channel_count:
+            return None
+
+        timestamps = list(self.timestamps)
+        if not timestamps:
+            return None
+
+        x_max = timestamps[-1]
+        x_min = max(0.0, x_max - max(0.1, float(window_seconds)))
+        start_index = 0
+        for index, timestamp in enumerate(timestamps):
+            if timestamp >= x_min:
+                start_index = index
+                break
+
+        window_x = timestamps[start_index:]
+        window_y = list(self.channels[channel_index])[start_index:]
+        if not window_x or not window_y:
+            return None
+        return window_x, window_y
+
     def get_plot_window(
         self, window_seconds: float
     ) -> tuple[float, float, list[float], list[list[float]], float, float] | None:

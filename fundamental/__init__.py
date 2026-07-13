@@ -16,6 +16,7 @@ __all__ = [
     "CommandSpec",
     "FundamentalApp",
     "ManagedWindow",
+    "RecordingSession",
     "SerialConfig",
     "WindowManager",
 ]
@@ -30,6 +31,10 @@ def __getattr__(name: str):
         from fundamental.acquisition import AcquisitionController
 
         return AcquisitionController
+    if name == "RecordingSession":
+        from fundamental.recording_session import RecordingSession
+
+        return RecordingSession
     if name in {"ManagedWindow", "WindowManager"}:
         from fundamental.window_manager import ManagedWindow, WindowManager
 

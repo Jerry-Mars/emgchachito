@@ -25,3 +25,8 @@ plot_result(result)
 
 The core analysis uses only the Python standard library. `plot_result` imports
 matplotlib lazily, so text reports still work without plotting dependencies.
+
+The report includes both raw/line-harmonic residual metrics and a more EMG-like
+1 s RMS metric using a 20 Hz high-pass filter plus 50 Hz harmonic notches. For
+scheduled rest/contraction captures, prefer the stable EMG-like epoch ratio
+because it trims each epoch edge and is less sensitive to slow drift.

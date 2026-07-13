@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import dearpygui.dearpygui as dpg
 
-from fundamental.acquisition import AcquisitionController
 from fundamental.app_shell import FundamentalApp
 from fundamental.commands import CommandSpec
 from fundamental.messages import AcquisitionState
+from fundamental.recording_session import RecordingSession
 from fundamental.window_manager import ManagedWindow
+
+if TYPE_CHECKING:
+    from fundamental.acquisition import AcquisitionController
 
 
 ACQUISITION_WINDOW_TAG = "fundamental.acquisition.window"
@@ -21,34 +26,37 @@ STOP_BUTTON_TAG = "fundamental.acquisition.stop"
 SAVE_BUTTON_TAG = "fundamental.acquisition.save"
 
 
-def register(app: FundamentalApp, controller: AcquisitionController) -> None:
+def register(app: FundamentalApp, session: RecordingSession) -> None:
+    controller = session.acquisition
     app.window_manager.register(
         ManagedWindow(
             tag=ACQUISITION_WINDOW_TAG,
             title="Acquisition",
-            build=lambda: _build_window(app, controller),
+            build=lambda: _build_window(app, session),
         )
     )
     app.register_command(
         CommandSpec(
             name="acquisition",
             description="Open acquisition controls.",
-            handler=lambda context: _open_window(context.app, controller),
+            handler=lambda context: _open_window(context.app, session),
             aliases=("record",),
         )
     )
-    app.register_frame_callback(lambda frame_app: _on_frame(frame_app, controller))
+    app.register_frame_callback(lambda frame_app: _on_frame(frame_app, session))
     app.register_shutdown_callback(lambda _frame_app: controller.shutdown())
 
 
-def _open_window(app: FundamentalApp, controller: AcquisitionController) -> str | None:
+def _open_window(app: FundamentalApp, session: RecordingSession) -> str | None:
+    controller = session.acquisition
     app.open_window(ACQUISITION_WINDOW_TAG)
     _sync_save_path(controller, force=True)
     _refresh_status(controller)
     return None
 
 
-def _build_window(app: FundamentalApp, controller: AcquisitionController) -> None:
+def _build_window(app: FundamentalApp, session: RecordingSession) -> None:
+    controller = session.acquisition
     with dpg.window(
         label="Acquisition",
         tag=ACQUISITION_WINDOW_TAG,
@@ -62,25 +70,25 @@ def _build_window(app: FundamentalApp, controller: AcquisitionController) -> Non
                 label="Start",
                 tag=START_BUTTON_TAG,
                 width=90,
-                callback=lambda *_: _run_action(app, lambda: _start(controller)),
+                callback=lambda *_: _run_action(app, lambda: _start(session)),
             )
             dpg.add_button(
                 label="Pause",
                 tag=PAUSE_BUTTON_TAG,
                 width=90,
-                callback=lambda *_: _run_action(app, lambda: _pause(controller)),
+                callback=lambda *_: _run_action(app, lambda: _pause(session)),
             )
             dpg.add_button(
                 label="Stop",
                 tag=STOP_BUTTON_TAG,
                 width=90,
-                callback=lambda *_: _run_action(app, lambda: _stop(controller)),
+                callback=lambda *_: _run_action(app, lambda: _stop(session)),
             )
             dpg.add_button(
                 label="Save",
                 tag=SAVE_BUTTON_TAG,
                 width=90,
-                callback=lambda *_: _run_action(app, lambda: _save(controller)),
+                callback=lambda *_: _run_action(app, lambda: _save(session)),
             )
 
         dpg.add_spacer(height=8)
@@ -97,34 +105,35 @@ def _build_window(app: FundamentalApp, controller: AcquisitionController) -> Non
     _refresh_status(controller)
 
 
-def _on_frame(app: FundamentalApp, controller: AcquisitionController) -> None:
-    controller.drain_queues(app.log)
+def _on_frame(_app: FundamentalApp, session: RecordingSession) -> None:
+    controller = session.acquisition
     if dpg.does_item_exist(ACQUISITION_WINDOW_TAG):
         _refresh_status(controller)
 
 
-def _start(controller: AcquisitionController) -> str:
-    result = controller.start()
-    _sync_save_path(controller, force=True)
-    _refresh_status(controller)
+def _start(session: RecordingSession) -> str:
+    result = session.start_acquisition()
+    _sync_save_path(session.acquisition, force=True)
+    _refresh_status(session.acquisition)
     return result
 
 
-def _pause(controller: AcquisitionController) -> str:
-    result = controller.pause()
-    _refresh_status(controller)
+def _pause(session: RecordingSession) -> list[str]:
+    result = session.pause()
+    _refresh_status(session.acquisition)
     return result
 
 
-def _stop(controller: AcquisitionController) -> str:
-    result = controller.stop()
-    _refresh_status(controller)
+def _stop(session: RecordingSession) -> list[str]:
+    result = session.stop()
+    _refresh_status(session.acquisition)
     return result
 
 
-def _save(controller: AcquisitionController) -> str:
+def _save(session: RecordingSession) -> str:
+    controller = session.acquisition
     path = _save_path_from_window(controller)
-    result = controller.save(path)
+    result = session.save(path)
     _sync_save_path(controller, force=True)
     _refresh_status(controller)
     return result
@@ -132,6 +141,11 @@ def _save(controller: AcquisitionController) -> str:
 
 def _run_action(app: FundamentalApp, action) -> None:
     result = action()
+    if isinstance(result, list):
+        for message in result:
+            if message:
+                app.log(message)
+        return
     if result:
         app.log(result)
 
@@ -145,7 +159,7 @@ def _refresh_status(controller: AcquisitionController) -> None:
         STATUS_TEXT_TAG,
         f"State: {state} | Samples: {controller.buffer.frame_count}",
     )
-    dpg.set_value(CONFIG_TEXT_TAG, f"Serial: {controller.config.display_text()}")
+    dpg.set_value(CONFIG_TEXT_TAG, f"Source: {controller.source_display_text()}")
     _sync_save_path(controller)
 
     running = controller.state == AcquisitionState.RUNNING

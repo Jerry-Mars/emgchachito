@@ -1,4 +1,4 @@
-"""Serial acquisition worker and controller."""
+"""Acquisition controller."""
 
 from __future__ import annotations
 
@@ -6,180 +6,81 @@ import queue
 import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
-from DeviceInterface.ads1299_protocol import ADS1299StreamParser, SAMPLE_RATE_HZ
 from fundamental import csv_writer
 from fundamental.messages import (
-    DEFAULT_MAX_FRAMES_PER_BATCH,
     AcquisitionState,
     SampleBatch,
-    SampleFrame,
     SerialConfig,
     WorkerEvent,
 )
 from fundamental.signal_buffer import SignalBuffer
-
-try:
-    import serial
-except ImportError:  # pragma: no cover - depends on local runtime
-    serial = None
+from fundamental.sources.base import AcquisitionSource, SourceName, SourceWorker
+from fundamental.sources.ble_w2 import BLEW2Source, W2BLEConfig, W2_MODE_NAMES
+from fundamental.sources.serial_ads1299 import SerialADS1299Source
 
 
 LogSink = Callable[[str], None]
-
-
-class SerialWorker(threading.Thread):
-    """Read serial frames in the background and publish sample batches."""
-
-    def __init__(
-        self,
-        config: SerialConfig,
-        data_queue: queue.Queue[SampleBatch],
-        event_queue: queue.Queue[WorkerEvent],
-        stop_event: threading.Event,
-        timestamp_offset_s: float = 0.0,
-        expected_counter: int | None = None,
-        max_frames_per_batch: int = DEFAULT_MAX_FRAMES_PER_BATCH,
-    ) -> None:
-        super().__init__(name="SerialWorker", daemon=True)
-        self.config = config.normalized()
-        self.data_queue = data_queue
-        self.event_queue = event_queue
-        self.stop_event = stop_event
-        self.timestamp_offset_s = timestamp_offset_s
-        self.expected_counter = expected_counter
-        self.max_frames_per_batch = max(1, int(max_frames_per_batch))
-        self._counter_origin: int | None = None
-        self._timestamp_origin_s = timestamp_offset_s
-        self._last_timestamp_s = timestamp_offset_s
-
-    def run(self) -> None:
-        if serial is None:
-            self.event_queue.put(
-                WorkerEvent("error", "pyserial is not installed; serial acquisition is unavailable.")
-            )
-            return
-
-        if not self.config.port:
-            self.event_queue.put(WorkerEvent("error", "Serial port is empty."))
-            return
-
-        serial_handle = None
-        try:
-            serial_handle = serial.Serial(
-                self.config.port,
-                self.config.baud_rate,
-                bytesize=serial.EIGHTBITS,
-                parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE,
-                timeout=self.config.timeout_s,
-            )
-            serial_handle.reset_input_buffer()
-            self.event_queue.put(WorkerEvent("log", f"Opened serial port {self.config.display_text()}"))
-
-            parser = ADS1299StreamParser()
-            parser.expected_counter = self.expected_counter
-            frames: list[SampleFrame] = []
-            logged_skipped_bytes = 0
-            while not self.stop_event.is_set():
-                try:
-                    chunk = serial_handle.read(512)
-                except serial.SerialException as exc:
-                    self.event_queue.put(WorkerEvent("error", f"Serial read failed: {exc}"))
-                    return
-                except OSError as exc:
-                    self.event_queue.put(WorkerEvent("error", f"Serial device error: {exc}"))
-                    return
-
-                if not chunk:
-                    self._flush(frames)
-                    continue
-
-                parsed_frames = parser.feed(chunk)
-                if parser.skipped_bytes - logged_skipped_bytes >= 256:
-                    logged_skipped_bytes = parser.skipped_bytes
-                    self.event_queue.put(
-                        WorkerEvent(
-                            "log",
-                            f"Skipped {parser.skipped_bytes} bytes while resynchronizing serial frames.",
-                        )
-                    )
-
-                for parsed_frame in parsed_frames:
-                    if parsed_frame.dropped_frames_before:
-                        self.event_queue.put(
-                            WorkerEvent(
-                                "log",
-                                "Frame counter discontinuity before "
-                                f"{parsed_frame.counter}: dropped={parsed_frame.dropped_frames_before}.",
-                            )
-                        )
-                    timestamp = self._timestamp_for_counter(parsed_frame.counter)
-                    frames.append(
-                        SampleFrame(
-                            time_s=timestamp,
-                            counter=parsed_frame.counter,
-                            dropped_frames_before=parsed_frame.dropped_frames_before,
-                            values=parsed_frame.channels_code,
-                            emg_channel_count=parsed_frame.emg_channel_count,
-                        )
-                    )
-                    if len(frames) >= self.max_frames_per_batch:
-                        self._flush(frames)
-        except serial.SerialException as exc:
-            self.event_queue.put(WorkerEvent("error", f"Failed to open serial port: {exc}"))
-        except OSError as exc:
-            self.event_queue.put(WorkerEvent("error", f"Failed to access serial device: {exc}"))
-        finally:
-            self._close_handle(serial_handle)
-
-    def _flush(self, frames: list[SampleFrame]) -> None:
-        if not frames:
-            return
-        self.data_queue.put(SampleBatch(tuple(frames)))
-        frames.clear()
-
-    def _timestamp_for_counter(self, counter: int) -> float:
-        if self._counter_origin is None:
-            if self.expected_counter is None:
-                self._counter_origin = counter
-            else:
-                self._counter_origin = self.expected_counter - 1
-            self._timestamp_origin_s = self.timestamp_offset_s
-
-        elapsed_samples = counter - self._counter_origin
-        if elapsed_samples < 0:
-            self._counter_origin = counter
-            self._timestamp_origin_s = self._last_timestamp_s + 1.0 / SAMPLE_RATE_HZ
-            elapsed_samples = 0
-
-        timestamp = self._timestamp_origin_s + elapsed_samples / SAMPLE_RATE_HZ
-        self._last_timestamp_s = max(self._last_timestamp_s, timestamp)
-        return timestamp
-
-    def _close_handle(self, serial_handle) -> None:
-        if serial_handle is None:
-            return
-        try:
-            serial_handle.close()
-            self.event_queue.put(WorkerEvent("log", "Serial port closed."))
-        except Exception as exc:  # pragma: no cover - hardware dependent
-            self.event_queue.put(WorkerEvent("error", f"Serial close failed: {exc}"))
+W2ModeName = Literal["emg_raw", "emg_rms", "eeg_raw"]
 
 
 class AcquisitionController:
     """Own acquisition state, queues, buffers, and persistence."""
 
     def __init__(self) -> None:
-        self.config = SerialConfig()
+        self.serial_source = SerialADS1299Source()
+        self.w2_source = BLEW2Source()
+        self.source_name: SourceName = SerialADS1299Source.name
         self.state = AcquisitionState.STOPPED
         self.buffer = SignalBuffer()
         self.data_queue: queue.Queue[SampleBatch] = queue.Queue()
         self.event_queue: queue.Queue[WorkerEvent] = queue.Queue()
-        self.worker: SerialWorker | None = None
+        self.worker: SourceWorker | None = None
         self.stop_event: threading.Event | None = None
         self.last_save_path = str(csv_writer.default_capture_path())
+
+    @property
+    def config(self) -> SerialConfig:
+        """Serial config compatibility alias for existing UI/tests."""
+
+        return self.serial_source.config
+
+    @config.setter
+    def config(self, value: SerialConfig) -> None:
+        self.serial_source = self.serial_source.with_config(value)
+
+    @property
+    def w2_config(self) -> W2BLEConfig:
+        return self.w2_source.config
+
+    @property
+    def source(self) -> AcquisitionSource:
+        if self.source_name == BLEW2Source.name:
+            return self.w2_source
+        return self.serial_source
+
+    def available_sources(self) -> tuple[tuple[SourceName, str], ...]:
+        return (
+            (SerialADS1299Source.name, SerialADS1299Source.display_name),
+            (BLEW2Source.name, BLEW2Source.display_name),
+        )
+
+    def source_display_text(self) -> str:
+        return self.source.display_text()
+
+    def select_source(self, source_name: str) -> str | None:
+        normalized = source_name.strip()
+        available = {name for name, _label in self.available_sources()}
+        if normalized not in available:
+            return f"Unknown acquisition source: {source_name}"
+        if normalized == self.source_name:
+            return None
+        if self.state != AcquisitionState.STOPPED:
+            return "Stop acquisition before changing source."
+
+        self.source_name = cast(SourceName, normalized)
+        return None
 
     def update_config(
         self,
@@ -187,15 +88,58 @@ class AcquisitionController:
         baud_rate: int | None = None,
         timeout_s: float | None = None,
     ) -> str | None:
-        if self.state == AcquisitionState.RUNNING:
-            return "Stop or pause acquisition before changing serial configuration."
+        return self.update_serial_config(port=port, baud_rate=baud_rate, timeout_s=timeout_s)
+
+    def update_serial_config(
+        self,
+        port: str | None = None,
+        baud_rate: int | None = None,
+        timeout_s: float | None = None,
+    ) -> str | None:
+        if self.state != AcquisitionState.STOPPED:
+            return "Stop acquisition before changing serial configuration."
 
         next_config = SerialConfig(
             port=self.config.port if port is None else port,
             baud_rate=self.config.baud_rate if baud_rate is None else baud_rate,
             timeout_s=self.config.timeout_s if timeout_s is None else timeout_s,
         ).normalized()
-        self.config = next_config
+        self.serial_source = self.serial_source.with_config(next_config)
+        return None
+
+    def update_w2_config(
+        self,
+        address: str | None = None,
+        device_name_filter: str | None = None,
+        notify_uuid: str | None = None,
+        write_uuid: str | None = None,
+        mode: str | None = None,
+        sample_rate_hz: float | None = None,
+        scan_timeout_s: float | None = None,
+    ) -> str | None:
+        if self.state != AcquisitionState.STOPPED:
+            return "Stop acquisition before changing W2 BLE configuration."
+
+        mode_value = self.w2_config.mode if mode is None else mode.strip()
+        if mode_value not in W2_MODE_NAMES:
+            return f"Unsupported W2 BLE mode: {mode_value}"
+        next_config = W2BLEConfig(
+            address=self.w2_config.address if address is None else address,
+            device_name_filter=(
+                self.w2_config.device_name_filter if device_name_filter is None else device_name_filter
+            ),
+            notify_uuid=self.w2_config.notify_uuid if notify_uuid is None else notify_uuid,
+            write_uuid=self.w2_config.write_uuid if write_uuid is None else write_uuid,
+            mode=cast(W2ModeName, mode_value),
+            sample_rate_hz=self.w2_config.sample_rate_hz if sample_rate_hz is None else sample_rate_hz,
+            scan_timeout_s=self.w2_config.scan_timeout_s if scan_timeout_s is None else scan_timeout_s,
+        ).normalized()
+        if not next_config.notify_uuid:
+            return "W2 BLE notify UUID cannot be empty."
+        if not next_config.write_uuid:
+            return "W2 BLE write UUID cannot be empty."
+
+        self.w2_source = self.w2_source.with_config(next_config)
         return None
 
     def start(self) -> str:
@@ -213,8 +157,7 @@ class AcquisitionController:
 
         self._clear_queues()
         self.stop_event = threading.Event()
-        self.worker = SerialWorker(
-            config=self.config,
+        self.worker = self.source.create_worker(
             data_queue=self.data_queue,
             event_queue=self.event_queue,
             stop_event=self.stop_event,
@@ -223,7 +166,7 @@ class AcquisitionController:
         )
         self.worker.start()
         self.state = AcquisitionState.RUNNING
-        return f"Acquisition started with {self.config.display_text()}."
+        return f"Acquisition started with {self.source.display_text()}."
 
     def pause(self) -> str:
         if self.state != AcquisitionState.RUNNING:

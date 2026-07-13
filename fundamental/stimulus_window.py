@@ -8,6 +8,7 @@ from fundamental.acquisition import AcquisitionController
 from fundamental.app_shell import FundamentalApp
 from fundamental.commands import CommandSpec
 from fundamental.messages import AcquisitionState
+from fundamental.recording_session import RecordingSession
 from fundamental.stimulus_model import StimulusController, StimulusEvent, StimulusState
 from fundamental.window_manager import ManagedWindow
 
@@ -32,32 +33,32 @@ SAVE_BUTTON_TAG = "fundamental.stimulus.save"
 
 def register(
     app: FundamentalApp,
-    acquisition: AcquisitionController,
-    stimulus: StimulusController,
+    session: RecordingSession,
 ) -> None:
     app.window_manager.register(
         ManagedWindow(
             tag=STIMULUS_WINDOW_TAG,
             title="Stimulus",
-            build=lambda: _build_window(app, acquisition, stimulus),
+            build=lambda: _build_window(app, session),
         )
     )
     app.register_command(
         CommandSpec(
             name="stimulus",
             description="Open stimulus schedule and experiment timeline.",
-            handler=lambda context: _open_window(context.app, acquisition, stimulus),
+            handler=lambda context: _open_window(context.app, session),
             aliases=("indication",),
         )
     )
-    app.register_frame_callback(lambda frame_app: _on_frame(frame_app, acquisition, stimulus))
+    app.register_frame_callback(lambda frame_app: _on_frame(frame_app, session))
 
 
 def _open_window(
     app: FundamentalApp,
-    acquisition: AcquisitionController,
-    stimulus: StimulusController,
+    session: RecordingSession,
 ) -> str | None:
+    acquisition = session.acquisition
+    stimulus = session.stimulus
     app.open_window(STIMULUS_WINDOW_TAG)
     _sync_save_path(acquisition, force=True)
     _refresh_window(acquisition, stimulus)
@@ -66,9 +67,10 @@ def _open_window(
 
 def _build_window(
     app: FundamentalApp,
-    acquisition: AcquisitionController,
-    stimulus: StimulusController,
+    session: RecordingSession,
 ) -> None:
+    acquisition = session.acquisition
+    stimulus = session.stimulus
     with dpg.window(
         label="Stimulus",
         tag=STIMULUS_WINDOW_TAG,
@@ -82,37 +84,37 @@ def _build_window(
                 label="Start",
                 tag=START_BUTTON_TAG,
                 width=90,
-                callback=lambda *_: _run_action(app, lambda: _start(acquisition, stimulus)),
+                callback=lambda *_: _run_action(app, lambda: _start(session)),
             )
             dpg.add_button(
                 label="Pause",
                 tag=PAUSE_BUTTON_TAG,
                 width=90,
-                callback=lambda *_: _run_action(app, lambda: _pause(acquisition, stimulus)),
+                callback=lambda *_: _run_action(app, lambda: _pause(session)),
             )
             dpg.add_button(
                 label="Resume",
                 tag=RESUME_BUTTON_TAG,
                 width=90,
-                callback=lambda *_: _run_action(app, lambda: _resume(acquisition, stimulus)),
+                callback=lambda *_: _run_action(app, lambda: _resume(session)),
             )
             dpg.add_button(
                 label="Stop",
                 tag=STOP_BUTTON_TAG,
                 width=90,
-                callback=lambda *_: _run_action(app, lambda: _stop(acquisition, stimulus)),
+                callback=lambda *_: _run_action(app, lambda: _stop(session)),
             )
             dpg.add_button(
                 label="Restart Event",
                 tag=RESTART_BUTTON_TAG,
                 width=120,
-                callback=lambda *_: _run_action(app, lambda: _restart_event(acquisition, stimulus)),
+                callback=lambda *_: _run_action(app, lambda: _restart_event(session)),
             )
             dpg.add_button(
                 label="Save",
                 tag=SAVE_BUTTON_TAG,
                 width=90,
-                callback=lambda *_: _run_action(app, lambda: _save(acquisition, stimulus)),
+                callback=lambda *_: _run_action(app, lambda: _save(session)),
             )
 
         dpg.add_spacer(height=8)
@@ -197,70 +199,50 @@ def _build_window(
 
 
 def _on_frame(
-    app: FundamentalApp,
-    acquisition: AcquisitionController,
-    stimulus: StimulusController,
+    _app: FundamentalApp,
+    session: RecordingSession,
 ) -> None:
-    was_running = stimulus.state == StimulusState.RUNNING
-    stimulus.update(acquisition.buffer.latest_time_s)
-    if (
-        was_running
-        and stimulus.state == StimulusState.STOPPED
-        and acquisition.state == AcquisitionState.RUNNING
-    ):
-        app.log(acquisition.stop())
-        app.log("Stimulus schedule completed.")
     if dpg.does_item_exist(STIMULUS_WINDOW_TAG):
-        _refresh_window(acquisition, stimulus)
+        _refresh_window(session.acquisition, session.stimulus)
 
 
-def _start(acquisition: AcquisitionController, stimulus: StimulusController) -> list[str]:
-    messages: list[str] = []
-    if acquisition.state != AcquisitionState.RUNNING:
-        messages.append(acquisition.start())
-    messages.append(stimulus.start(acquisition.buffer.latest_time_s))
-    _sync_save_path(acquisition, force=True)
-    _refresh_window(acquisition, stimulus)
+def _start(session: RecordingSession) -> list[str]:
+    messages = session.start_stimulus()
+    _sync_save_path(session.acquisition, force=True)
+    _refresh_window(session.acquisition, session.stimulus)
     return messages
 
 
-def _pause(acquisition: AcquisitionController, stimulus: StimulusController) -> list[str]:
-    messages = [acquisition.pause()]
-    messages.append(stimulus.pause(acquisition.buffer.latest_time_s))
-    _refresh_window(acquisition, stimulus)
+def _pause(session: RecordingSession) -> list[str]:
+    messages = session.pause()
+    _refresh_window(session.acquisition, session.stimulus)
     return messages
 
 
-def _resume(acquisition: AcquisitionController, stimulus: StimulusController) -> list[str]:
-    messages = [acquisition.start()]
-    messages.append(stimulus.resume(acquisition.buffer.latest_time_s))
-    _refresh_window(acquisition, stimulus)
+def _resume(session: RecordingSession) -> list[str]:
+    messages = session.resume()
+    _refresh_window(session.acquisition, session.stimulus)
     return messages
 
 
-def _stop(acquisition: AcquisitionController, stimulus: StimulusController) -> list[str]:
-    messages = [acquisition.stop()]
-    messages.append(stimulus.stop(acquisition.buffer.latest_time_s))
-    _refresh_window(acquisition, stimulus)
+def _stop(session: RecordingSession) -> list[str]:
+    messages = session.stop()
+    _refresh_window(session.acquisition, session.stimulus)
     return messages
 
 
-def _restart_event(acquisition: AcquisitionController, stimulus: StimulusController) -> str:
-    result = stimulus.restart_event(acquisition.buffer.latest_time_s)
-    _refresh_window(acquisition, stimulus)
+def _restart_event(session: RecordingSession) -> str:
+    result = session.restart_event()
+    _refresh_window(session.acquisition, session.stimulus)
     return result
 
 
-def _save(acquisition: AcquisitionController, stimulus: StimulusController) -> str:
-    stimulus.update(acquisition.buffer.latest_time_s)
+def _save(session: RecordingSession) -> str:
+    acquisition = session.acquisition
     path = _save_path_from_window(acquisition)
-    result = acquisition.save(
-        path,
-        stimulus_code_for_time=stimulus.stimulus_code_at,
-        stimulus_log_rows=stimulus.event_log_rows(),
-    )
+    result = session.save(path)
     _sync_save_path(acquisition, force=True)
-    _refresh_window(acquisition, stimulus)
+    _refresh_window(acquisition, session.stimulus)
     return result
 
 
@@ -341,7 +323,6 @@ def _refresh_window(acquisition: AcquisitionController, stimulus: StimulusContro
     if not dpg.does_item_exist(STIMULUS_WINDOW_TAG):
         return
 
-    stimulus.update(acquisition.buffer.latest_time_s)
     state = stimulus.state.value.upper()
     dpg.set_value(
         STATUS_TEXT_TAG,

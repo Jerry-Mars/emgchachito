@@ -25,6 +25,10 @@ DEFAULT_GAIN = 2.0
 FULL_SCALE_POS = 8388607
 FULL_SCALE_NEG = -8388608
 DEFAULT_LINE_HARMONICS = (50, 100, 150, 200, 250)
+DEFAULT_EMG_HIGHPASS_HZ = 20.0
+DEFAULT_EMG_LINE_HZ = 50
+DEFAULT_EMG_NOTCH_MAX_HZ = 450
+DEFAULT_STABLE_TRIM_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,12 @@ class BlockMetric:
 
 
 @dataclass(frozen=True)
+class EmgBlockMetric:
+    start_s: float
+    emg_like_rms: float
+
+
+@dataclass(frozen=True)
 class EpochMetric:
     cycle: int
     label: str
@@ -81,6 +91,24 @@ class EpochMetric:
 
 
 @dataclass(frozen=True)
+class StableEpochMetric:
+    cycle: int
+    label: str
+    start_s: float
+    end_s: float
+    emg_like_rms: float
+
+
+@dataclass(frozen=True)
+class PhaseScanMetric:
+    ratio: float
+    pattern: str
+    offset_s: float
+    low_mean: float
+    high_mean: float
+
+
+@dataclass(frozen=True)
 class CaptureAnalysis:
     capture: ChannelCapture
     fs_hz: float
@@ -91,10 +119,16 @@ class CaptureAnalysis:
     dominant_frequencies: list[tuple[int, float]]
     selected_frequency_powers: dict[int, float]
     block_metrics: list[BlockMetric]
+    emg_block_metrics: list[EmgBlockMetric]
     epoch_metrics: list[EpochMetric]
+    stable_epoch_metrics: list[StableEpochMetric]
+    phase_scan_metrics: list[PhaseScanMetric]
     rest_residual_mean: float | None
     contraction_residual_mean: float | None
     contraction_rest_ratio: float | None
+    stable_rest_mean: float | None
+    stable_contraction_mean: float | None
+    stable_contraction_rest_ratio: float | None
 
 
 def load_capture(path: str | Path, channel: int = 8) -> ChannelCapture:
@@ -156,6 +190,12 @@ def analyze_capture(
         block_s=block_s,
         line_harmonics=line_harmonics,
     )
+    emg_block_metrics = compute_emg_block_metrics(
+        capture.time_s,
+        capture.values,
+        fs_hz=fs_hz,
+        block_s=block_s,
+    )
     epoch_metrics = compute_epoch_metrics(
         capture.values,
         fs_hz=fs_hz,
@@ -163,6 +203,19 @@ def analyze_capture(
         contract_s=contract_s,
         cycles=cycles,
         line_harmonics=line_harmonics,
+    )
+    stable_epoch_metrics = compute_stable_epoch_metrics(
+        emg_block_metrics,
+        rest_s=rest_s,
+        contract_s=contract_s,
+        cycles=cycles,
+        trim_s=DEFAULT_STABLE_TRIM_S,
+    )
+    phase_scan_metrics = scan_phase_offsets(
+        emg_block_metrics,
+        rest_s=rest_s,
+        contract_s=contract_s,
+        skip_initial_s=2.0 * DEFAULT_STABLE_TRIM_S,
     )
     rest_values = [epoch.residual_rms for epoch in epoch_metrics if epoch.label == "rest"]
     contraction_values = [
@@ -173,6 +226,25 @@ def analyze_capture(
     ratio = None
     if rest_mean is not None and contraction_mean is not None and rest_mean > 0:
         ratio = contraction_mean / rest_mean
+    stable_rest_values = [
+        epoch.emg_like_rms for epoch in stable_epoch_metrics if epoch.label == "rest"
+    ]
+    stable_contraction_values = [
+        epoch.emg_like_rms
+        for epoch in stable_epoch_metrics
+        if epoch.label == "contraction"
+    ]
+    stable_rest_mean = mean(stable_rest_values) if stable_rest_values else None
+    stable_contraction_mean = (
+        mean(stable_contraction_values) if stable_contraction_values else None
+    )
+    stable_ratio = None
+    if (
+        stable_rest_mean is not None
+        and stable_contraction_mean is not None
+        and stable_rest_mean > 0
+    ):
+        stable_ratio = stable_contraction_mean / stable_rest_mean
 
     return CaptureAnalysis(
         capture=capture,
@@ -184,10 +256,16 @@ def analyze_capture(
         dominant_frequencies=dominant,
         selected_frequency_powers=selected,
         block_metrics=block_metrics,
+        emg_block_metrics=emg_block_metrics,
         epoch_metrics=epoch_metrics,
+        stable_epoch_metrics=stable_epoch_metrics,
+        phase_scan_metrics=phase_scan_metrics,
         rest_residual_mean=rest_mean,
         contraction_residual_mean=contraction_mean,
         contraction_rest_ratio=ratio,
+        stable_rest_mean=stable_rest_mean,
+        stable_contraction_mean=stable_contraction_mean,
+        stable_contraction_rest_ratio=stable_ratio,
     )
 
 
@@ -249,6 +327,26 @@ def compute_block_metrics(
     return metrics
 
 
+def compute_emg_block_metrics(
+    time_s: list[float],
+    values: list[int],
+    fs_hz: float,
+    block_s: float,
+) -> list[EmgBlockMetric]:
+    block_len = max(1, int(round(block_s * fs_hz)))
+    filtered = emg_like_filter(values, fs_hz=fs_hz)
+    metrics: list[EmgBlockMetric] = []
+    for start in range(0, len(filtered) - block_len + 1, block_len):
+        segment = filtered[start : start + block_len]
+        metrics.append(
+            EmgBlockMetric(
+                start_s=time_s[start],
+                emg_like_rms=math.sqrt(sum(value * value for value in segment) / block_len),
+            )
+        )
+    return metrics
+
+
 def compute_epoch_metrics(
     values: list[int],
     fs_hz: float,
@@ -300,6 +398,118 @@ def compute_epoch_metrics(
                 )
             )
     return metrics
+
+
+def compute_stable_epoch_metrics(
+    emg_blocks: list[EmgBlockMetric],
+    rest_s: float | None,
+    contract_s: float | None,
+    cycles: int | None,
+    trim_s: float,
+) -> list[StableEpochMetric]:
+    if rest_s is None or contract_s is None:
+        return []
+
+    cycle_s = rest_s + contract_s
+    if cycle_s <= 0:
+        return []
+
+    block_step_s = _infer_block_step(emg_blocks)
+    covered_s = emg_blocks[-1].start_s + block_step_s if emg_blocks else 0.0
+    inferred_cycles = int(covered_s // cycle_s)
+    cycle_count = inferred_cycles if cycles is None else min(cycles, inferred_cycles)
+    metrics: list[StableEpochMetric] = []
+    for cycle in range(cycle_count):
+        cycle_start = cycle * cycle_s
+        windows = (
+            ("rest", cycle_start, cycle_start + rest_s),
+            ("contraction", cycle_start + rest_s, cycle_start + cycle_s),
+        )
+        for label, start_s, end_s in windows:
+            values = [
+                block.emg_like_rms
+                for block in emg_blocks
+                if block.start_s >= start_s + trim_s and block.start_s < end_s - trim_s
+            ]
+            if not values:
+                continue
+            metrics.append(
+                StableEpochMetric(
+                    cycle=cycle + 1,
+                    label=label,
+                    start_s=start_s,
+                    end_s=end_s,
+                    emg_like_rms=mean(values),
+                )
+            )
+    return metrics
+
+
+def scan_phase_offsets(
+    emg_blocks: list[EmgBlockMetric],
+    rest_s: float | None,
+    contract_s: float | None,
+    skip_initial_s: float = 0.0,
+    max_results: int = 5,
+) -> list[PhaseScanMetric]:
+    if rest_s is None or contract_s is None or not emg_blocks:
+        return []
+
+    cycle_s = rest_s + contract_s
+    if cycle_s <= 0:
+        return []
+
+    step_s = _infer_block_step(emg_blocks)
+    offset_count = max(1, int(round(cycle_s / step_s)))
+    scans: list[PhaseScanMetric] = []
+    for pattern in ("rest_then_contract", "contract_then_rest"):
+        for offset_index in range(offset_count):
+            offset_s = offset_index * step_s
+            low_values: list[float] = []
+            high_values: list[float] = []
+            for block in emg_blocks:
+                if block.start_s < skip_initial_s:
+                    continue
+                phase = (block.start_s - offset_s) % cycle_s
+                if pattern == "rest_then_contract":
+                    is_high = rest_s <= phase < cycle_s
+                else:
+                    is_high = 0.0 <= phase < contract_s
+                if is_high:
+                    high_values.append(block.emg_like_rms)
+                else:
+                    low_values.append(block.emg_like_rms)
+
+            if not high_values or not low_values:
+                continue
+            low_mean = mean(low_values)
+            high_mean = mean(high_values)
+            if low_mean <= 0:
+                continue
+            scans.append(
+                PhaseScanMetric(
+                    ratio=high_mean / low_mean,
+                    pattern=pattern,
+                    offset_s=offset_s,
+                    low_mean=low_mean,
+                    high_mean=high_mean,
+                )
+            )
+
+    return sorted(scans, key=lambda metric: metric.ratio, reverse=True)[:max_results]
+
+
+def emg_like_filter(values: list[int], fs_hz: float) -> list[float]:
+    filtered = _center(values)
+    filtered = _filtfilt_biquad(
+        filtered,
+        _highpass_coeff(DEFAULT_EMG_HIGHPASS_HZ, fs_hz=fs_hz),
+    )
+    nyquist = fs_hz / 2.0
+    notch_limit = min(DEFAULT_EMG_NOTCH_MAX_HZ, int(nyquist) - 1)
+    for frequency in range(DEFAULT_EMG_LINE_HZ, notch_limit + 1, DEFAULT_EMG_LINE_HZ):
+        filtered = _filtfilt_biquad(filtered, _notch_coeff(frequency, fs_hz=fs_hz))
+    return filtered
 
 
 def decompose_line_harmonics(
@@ -431,6 +641,22 @@ def format_report(result: CaptureAnalysis) -> str:
             ]
         )
 
+    if result.emg_block_metrics:
+        emg_values = [metric.emg_like_rms for metric in result.emg_block_metrics]
+        lines.extend(
+            [
+                "",
+                "1 s EMG-like windows:",
+                "  filter: 20 Hz high-pass, then 50 Hz harmonic notches up to 450 Hz",
+                "  RMS q0/q25/q50/q75/q100 code: "
+                + _format_numbers(quantiles(emg_values, [0, 25, 50, 75, 100])),
+                "  RMS q0/q25/q50/q75/q100 uV: "
+                + _format_numbers(
+                    [value * result.lsb_uv for value in quantiles(emg_values, [0, 25, 50, 75, 100])]
+                ),
+            ]
+        )
+
     if result.epoch_metrics:
         lines.extend(["", "Scheduled epochs:"])
         lines.append(
@@ -458,6 +684,46 @@ def format_report(result: CaptureAnalysis) -> str:
         ratio = result.contraction_rest_ratio
         if ratio is not None:
             lines.append(f"  contraction/rest residual ratio: {ratio:.3f}")
+
+    if result.stable_epoch_metrics:
+        lines.extend(
+            [
+                "",
+                f"Stable EMG-like epochs from 1 s windows (trim {DEFAULT_STABLE_TRIM_S:g} s edges):",
+                "  cycle label       start-end(s) emg_like_rms emg_like_uV",
+            ]
+        )
+        for metric in result.stable_epoch_metrics:
+            lines.append(
+                "  "
+                f"{metric.cycle:>2}    {metric.label:<11} "
+                f"{metric.start_s:>5.1f}-{metric.end_s:<5.1f} "
+                f"{metric.emg_like_rms:>12.1f} "
+                f"{metric.emg_like_rms * result.lsb_uv:>11.2f}"
+            )
+        lines.append("")
+        lines.append(
+            "  rest EMG-like mean: "
+            + _format_optional(result.stable_rest_mean, result.lsb_uv)
+        )
+        lines.append(
+            "  contraction EMG-like mean: "
+            + _format_optional(result.stable_contraction_mean, result.lsb_uv)
+        )
+        stable_ratio = result.stable_contraction_rest_ratio
+        if stable_ratio is not None:
+            lines.append(f"  contraction/rest EMG-like ratio: {stable_ratio:.3f}")
+
+    if result.phase_scan_metrics:
+        lines.extend(["", "Best phase scans for the scheduled period:"])
+        for metric in result.phase_scan_metrics:
+            lines.append(
+                "  "
+                f"ratio={metric.ratio:.3f}, pattern={metric.pattern}, "
+                f"offset={metric.offset_s:.1f}s, "
+                f"low={metric.low_mean * result.lsb_uv:.2f}uV, "
+                f"high={metric.high_mean * result.lsb_uv:.2f}uV"
+            )
 
     lines.extend(["", "Heuristic interpretation:", *interpret_result(result)])
     return "\n".join(lines)
@@ -499,6 +765,15 @@ def interpret_result(result: CaptureAnalysis) -> list[str]:
         messages.append(
             "- The scheduled contraction windows do not show an EMG-like residual increase over rest."
         )
+
+    stable_ratio = result.stable_contraction_rest_ratio
+    if stable_ratio is not None:
+        if stable_ratio >= 1.3:
+            messages.append("- Stable EMG-like windows show a clear contraction increase.")
+        elif stable_ratio >= 1.1:
+            messages.append("- Stable EMG-like windows show only a weak contraction increase.")
+        else:
+            messages.append("- Stable EMG-like windows do not show a reliable contraction increase.")
     return messages
 
 
@@ -507,7 +782,7 @@ def plot_result(result: CaptureAnalysis, output_path: str | Path | None = None):
 
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=False)
+    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=False)
     axes[0].plot(result.capture.time_s, result.capture.values, linewidth=0.7)
     axes[0].set_title(f"{result.capture.path.name} ch{result.capture.channel} raw code")
     axes[0].set_xlabel("Time (s)")
@@ -521,6 +796,14 @@ def plot_result(result: CaptureAnalysis, output_path: str | Path | None = None):
         axes[1].set_xlabel("Time (s)")
         axes[1].set_ylabel("uV")
 
+    if result.emg_block_metrics:
+        x = [metric.start_s for metric in result.emg_block_metrics]
+        y = [metric.emg_like_rms * result.lsb_uv for metric in result.emg_block_metrics]
+        axes[2].plot(x, y, marker="o", linewidth=1.0)
+        axes[2].set_title("1 s EMG-like RMS after 20 Hz high-pass and line notches")
+        axes[2].set_xlabel("Time (s)")
+        axes[2].set_ylabel("uV")
+
     for metric in result.epoch_metrics:
         color = "#d8f0ff" if metric.label == "rest" else "#ffe2d1"
         for ax in axes:
@@ -530,6 +813,78 @@ def plot_result(result: CaptureAnalysis, output_path: str | Path | None = None):
     if output_path is not None:
         fig.savefig(output_path, dpi=160)
     return fig
+
+
+def _center(values: Sequence[float]) -> list[float]:
+    baseline = mean(values)
+    return [value - baseline for value in values]
+
+
+def _infer_block_step(blocks: Sequence[EmgBlockMetric]) -> float:
+    if len(blocks) < 2:
+        return 1.0
+    return max(blocks[1].start_s - blocks[0].start_s, 1e-9)
+
+
+def _highpass_coeff(
+    frequency_hz: float,
+    fs_hz: float,
+    q: float = 0.70710678,
+) -> tuple[float, float, float, float, float]:
+    omega = 2.0 * math.pi * frequency_hz / fs_hz
+    cosine = math.cos(omega)
+    alpha = math.sin(omega) / (2.0 * q)
+    b0 = (1.0 + cosine) / 2.0
+    b1 = -(1.0 + cosine)
+    b2 = (1.0 + cosine) / 2.0
+    a0 = 1.0 + alpha
+    a1 = -2.0 * cosine
+    a2 = 1.0 - alpha
+    return b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0
+
+
+def _notch_coeff(
+    frequency_hz: float,
+    fs_hz: float,
+    q: float = 35.0,
+) -> tuple[float, float, float, float, float]:
+    omega = 2.0 * math.pi * frequency_hz / fs_hz
+    cosine = math.cos(omega)
+    alpha = math.sin(omega) / (2.0 * q)
+    b0 = 1.0
+    b1 = -2.0 * cosine
+    b2 = 1.0
+    a0 = 1.0 + alpha
+    a1 = -2.0 * cosine
+    a2 = 1.0 - alpha
+    return b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0
+
+
+def _filter_biquad(
+    values: Sequence[float],
+    coeffs: tuple[float, float, float, float, float],
+) -> list[float]:
+    b0, b1, b2, a1, a2 = coeffs
+    x1 = x2 = y1 = y2 = 0.0
+    output: list[float] = []
+    for x0 in values:
+        y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        output.append(y0)
+        x2 = x1
+        x1 = x0
+        y2 = y1
+        y1 = y0
+    return output
+
+
+def _filtfilt_biquad(
+    values: Sequence[float],
+    coeffs: tuple[float, float, float, float, float],
+) -> list[float]:
+    filtered = _filter_biquad(values, coeffs)
+    filtered = list(reversed(filtered))
+    filtered = _filter_biquad(filtered, coeffs)
+    return list(reversed(filtered))
 
 
 def code_to_microvolts(code: float, vref: float, gain: float) -> float:

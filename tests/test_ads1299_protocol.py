@@ -12,7 +12,6 @@ from DeviceInterface.ads1299_protocol import (
     int24_be_to_signed,
     parse_frame,
 )
-from fundamental.acquisition import SerialWorker
 from fundamental.csv_writer import save_frames, save_stimulus_log, stimulus_log_path
 from fundamental.messages import (
     CHANNEL_COUNT,
@@ -22,6 +21,7 @@ from fundamental.messages import (
     SerialConfig,
 )
 from fundamental.signal_buffer import SignalBuffer
+from fundamental.sources.serial_ads1299 import SerialWorker
 from fundamental.stimulus_model import INVALID_STIMULUS_CODE, StimulusController, StimulusEvent, StimulusState
 
 
@@ -120,6 +120,12 @@ class AcquisitionDataContractTests(unittest.TestCase):
         self.assertIsNotNone(window)
         assert window is not None
         self.assertEqual(len(window[3]), 4)
+        channel_window = buffer.get_channel_window(1, 1.0)
+        self.assertIsNotNone(channel_window)
+        assert channel_window is not None
+        self.assertEqual(channel_window[0], [0.0, 0.1])
+        self.assertEqual(channel_window[1], [-1.0, -1.0])
+        self.assertIsNone(buffer.get_channel_window(4, 1.0))
 
         with tempfile.TemporaryDirectory() as tmp:
             path, rows = save_frames(Path(tmp) / "capture.csv", buffer.snapshot_frames())

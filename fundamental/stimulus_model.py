@@ -97,6 +97,14 @@ class StimulusController:
             self.current_event_index = 0
         return None
 
+    def reset_timeline(self) -> str | None:
+        if self.state in (StimulusState.RUNNING, StimulusState.PAUSED):
+            return "Stop stimulus before resetting the timeline."
+        self.state = StimulusState.IDLE
+        self.current_event_index = 0
+        self.attempts = []
+        return None
+
     def start(self, sample_time_s: float) -> str:
         if self.state == StimulusState.RUNNING:
             return "Stimulus timeline is already running."
