@@ -5,6 +5,7 @@ import queue
 import struct
 import threading
 import unittest
+from types import SimpleNamespace
 
 from DeviceInterface.w2_protocol import W2CommandBuilder, W2RawPacket, W2RmsPacket, W2StreamParser
 import fundamental.sources.ble_w2 as ble_w2_module
@@ -118,6 +119,12 @@ class W2SampleAdapterTests(unittest.TestCase):
 
 
 class BLEW2SourceTests(unittest.TestCase):
+    def test_default_config_scans_by_name_instead_of_using_demo_address(self) -> None:
+        config = W2BLEConfig()
+
+        self.assertEqual(config.address, "")
+        self.assertEqual(config.device_name_filter, "RunE W2")
+
     def test_source_builds_worker_with_config(self) -> None:
         config = W2BLEConfig(address="AA:BB", mode="emg_rms")
         source = BLEW2Source(config=config)
@@ -166,7 +173,37 @@ class TrackingStopClient:
         self.stop_notify_count += 1
 
 
+class FindingScanner:
+    device = SimpleNamespace(name="RunE W2 T1", address="AA:BB:CC")
+
+    @classmethod
+    async def find_device_by_filter(cls, predicate, timeout: float):
+        advertisement = SimpleNamespace(local_name="RunE W2 T1")
+        return cls.device if predicate(cls.device, advertisement) else None
+
+    @classmethod
+    async def find_device_by_address(cls, address: str, timeout: float):
+        return cls.device if address == cls.device.address else None
+
+
 class BLEW2WorkerTests(unittest.TestCase):
+    def test_name_scan_resolves_demo_family_device_and_keeps_ble_device(self) -> None:
+        worker = BLEW2Worker(
+            config=W2BLEConfig(address="", device_name_filter="RunE W2"),
+            data_queue=queue.Queue(),
+            event_queue=queue.Queue(),
+            stop_event=threading.Event(),
+        )
+        old_scanner = ble_w2_module.BleakScanner
+        ble_w2_module.BleakScanner = FindingScanner  # type: ignore[assignment]
+        try:
+            address = asyncio.run(worker._resolve_address())
+        finally:
+            ble_w2_module.BleakScanner = old_scanner
+
+        self.assertEqual(address, "AA:BB:CC")
+        self.assertIs(worker._resolved_device, FindingScanner.device)
+
     def test_start_cancelled_after_address_resolution_does_not_connect(self) -> None:
         event_queue: queue.Queue = queue.Queue()
         stop_event = threading.Event()

@@ -138,6 +138,8 @@ class AcquisitionController:
             return "W2 BLE notify UUID cannot be empty."
         if not next_config.write_uuid:
             return "W2 BLE write UUID cannot be empty."
+        if not next_config.address and not next_config.device_name_filter:
+            return "W2 BLE address and name filter cannot both be empty."
 
         self.w2_source = self.w2_source.with_config(next_config)
         return None

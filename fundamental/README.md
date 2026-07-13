@@ -92,8 +92,14 @@ The current shared services are:
 The acquisition controller owns the selected source and blocks source switching
 unless acquisition is stopped. Current sources:
 
-- `serial_ads1299`: serial ADS1299 worker using `DeviceInterface/ads1299_protocol.py`.
+- `serial_ads1299`: serial ADS1299 worker using
+  `DeviceInterface/ads1299_protocol.py` (accepts both the current 35-byte frame
+  and the legacy 34-byte frame).
 - `ble_w2`: BLE W2 worker using `DeviceInterface/w2_protocol.py`.
+
+BLE defaults to scanning for an advertised name containing `RunE W2`. Enter an
+address only when intentionally pinning acquisition to one known unit; the
+address in `device_host_demo/main.py` is specific to that demo device.
 
 The `source` command opens the shared source window. Its data inspection block
 shows the selected source's worker handle, transport handle, parser, and current

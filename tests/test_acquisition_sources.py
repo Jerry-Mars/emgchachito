@@ -134,6 +134,10 @@ class AcquisitionSourceTests(unittest.TestCase):
             controller.update_w2_config(mode="bad"),
             "Unsupported W2 BLE mode: bad",
         )
+        self.assertEqual(
+            controller.update_w2_config(address="", device_name_filter=""),
+            "W2 BLE address and name filter cannot both be empty.",
+        )
 
     def test_sources_expose_data_inspection_text(self) -> None:
         serial_lines = SerialADS1299Source().inspect_data()

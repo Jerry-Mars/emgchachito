@@ -43,6 +43,15 @@ def make_frame(counter: int, values: tuple[int, ...] = VALUES, emg_channel_count
     return bytes(payload)
 
 
+def make_legacy_frame(counter: int, values: tuple[int, ...] = VALUES) -> bytes:
+    payload = bytearray([0xAA])
+    for value in values:
+        payload.extend(int24_bytes(value))
+    payload.extend(counter.to_bytes(8, "big"))
+    payload.append(0xBB)
+    return bytes(payload)
+
+
 class ADS1299ProtocolTests(unittest.TestCase):
     def test_int24_conversion(self) -> None:
         self.assertEqual(int24_be_to_signed(0x00, 0x00, 0x01), 1)
@@ -56,6 +65,23 @@ class ADS1299ProtocolTests(unittest.TestCase):
         self.assertEqual(parsed.emg_channel_count, 4)
         self.assertEqual(parsed.channels_code, VALUES)
         self.assertEqual(parsed.emg_channels_code, VALUES[:4])
+
+    def test_parse_legacy_frame_without_channel_count(self) -> None:
+        parsed = parse_frame(make_legacy_frame(9))
+
+        self.assertEqual(parsed.counter, 9)
+        self.assertEqual(parsed.emg_channel_count, 8)
+        self.assertEqual(parsed.channels_code, VALUES)
+
+    def test_stream_auto_detects_legacy_and_current_frames(self) -> None:
+        parser = ADS1299StreamParser()
+
+        frames = parser.feed(make_legacy_frame(10) + make_legacy_frame(11) + make_frame(12))
+
+        self.assertEqual([frame.counter for frame in frames], [10, 11, 12])
+        self.assertEqual([frame.emg_channel_count for frame in frames], [8, 8, 4])
+        self.assertEqual(parser.legacy_frame_count, 2)
+        self.assertEqual(parser.current_frame_count, 1)
 
     def test_rejects_invalid_emg_channel_count(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid emg channel count"):
@@ -184,6 +210,19 @@ class AcquisitionDataContractTests(unittest.TestCase):
         self.assertEqual(worker._timestamp_for_counter(100), 0.0)
         self.assertEqual(worker._timestamp_for_counter(101), 0.001)
         self.assertEqual(worker._timestamp_for_counter(104), 0.004)
+
+    def test_worker_reports_open_port_with_no_received_bytes(self) -> None:
+        event_queue: queue.Queue = queue.Queue()
+        worker = SerialWorker(
+            config=SerialConfig(),
+            data_queue=queue.Queue(),
+            event_queue=event_queue,
+            stop_event=threading.Event(),
+        )
+
+        worker._report_no_frames_if_due(0.0)
+
+        self.assertIn("no bytes have arrived", event_queue.get_nowait().message)
 
     def test_resumed_worker_timestamps_continue_after_previous_counter(self) -> None:
         worker = SerialWorker(

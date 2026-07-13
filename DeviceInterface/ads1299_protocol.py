@@ -12,11 +12,13 @@ from dataclasses import dataclass
 FRAME_HEADER = 0xAA
 FRAME_TAIL = 0xBB
 FRAME_LEN = 35
+LEGACY_FRAME_LEN = 34
 CHANNEL_COUNT = 8
 CHANNEL_BYTES = 3
 CHANNEL_COUNT_OFFSET = 1
 CHANNELS_OFFSET = 2
 COUNTER_OFFSET = 26
+LEGACY_COUNTER_OFFSET = 25
 COUNTER_LEN = 8
 SAMPLE_RATE_HZ = 1000
 
@@ -43,23 +45,32 @@ def int24_be_to_signed(b0: int, b1: int, b2: int) -> int:
 
 
 def parse_frame(frame: bytes) -> ADS1299Frame:
-    if len(frame) != FRAME_LEN:
+    if len(frame) not in (LEGACY_FRAME_LEN, FRAME_LEN):
         raise ValueError("invalid frame length")
     if frame[0] != FRAME_HEADER or frame[-1] != FRAME_TAIL:
         raise ValueError("invalid frame boundary")
 
-    emg_channel_count = frame[CHANNEL_COUNT_OFFSET]
-    if emg_channel_count < 1 or emg_channel_count > CHANNEL_COUNT:
-        raise ValueError("invalid emg channel count")
+    if len(frame) == FRAME_LEN:
+        emg_channel_count = frame[CHANNEL_COUNT_OFFSET]
+        if emg_channel_count < 1 or emg_channel_count > CHANNEL_COUNT:
+            raise ValueError("invalid emg channel count")
+        channels_offset = CHANNELS_OFFSET
+        counter_offset = COUNTER_OFFSET
+    else:
+        # Frames produced before emg_channel_count was added contain all eight
+        # channels immediately after the header.
+        emg_channel_count = CHANNEL_COUNT
+        channels_offset = 1
+        counter_offset = LEGACY_COUNTER_OFFSET
 
     channels: list[int] = []
-    offset = CHANNELS_OFFSET
+    offset = channels_offset
     for _ in range(CHANNEL_COUNT):
         channels.append(int24_be_to_signed(frame[offset], frame[offset + 1], frame[offset + 2]))
         offset += CHANNEL_BYTES
 
     counter = int.from_bytes(
-        frame[COUNTER_OFFSET : COUNTER_OFFSET + COUNTER_LEN],
+        frame[counter_offset : counter_offset + COUNTER_LEN],
         byteorder="big",
         signed=False,
     )
@@ -79,6 +90,8 @@ class ADS1299StreamParser:
         self.skipped_bytes = 0
         self.bad_tail_count = 0
         self.bad_channel_count = 0
+        self.current_frame_count = 0
+        self.legacy_frame_count = 0
 
     def feed(self, data: bytes) -> list[ADS1299Frame]:
         if data:
@@ -96,22 +109,40 @@ class ADS1299StreamParser:
                 self.skipped_bytes += header_index
                 del self.buffer[:header_index]
 
+            # A legacy frame is 34 bytes while the current frame is 35 bytes.
+            # Wait for one byte beyond a possible legacy tail so the layouts
+            # can be distinguished without guessing from channel data.
             if len(self.buffer) < FRAME_LEN:
                 return frames
 
-            candidate = bytes(self.buffer[:FRAME_LEN])
-            if candidate[-1] != FRAME_TAIL:
-                self.bad_tail_count += 1
-                self.skipped_bytes += 1
-                del self.buffer[0]
-                continue
-            if not 1 <= candidate[CHANNEL_COUNT_OFFSET] <= CHANNEL_COUNT:
+            is_current = (
+                self.buffer[FRAME_LEN - 1] == FRAME_TAIL
+                and 1 <= self.buffer[CHANNEL_COUNT_OFFSET] <= CHANNEL_COUNT
+            )
+            is_legacy = (
+                self.buffer[LEGACY_FRAME_LEN - 1] == FRAME_TAIL
+                and self.buffer[LEGACY_FRAME_LEN] == FRAME_HEADER
+            )
+
+            if is_current:
+                candidate_len = FRAME_LEN
+                self.current_frame_count += 1
+            elif is_legacy:
+                candidate_len = LEGACY_FRAME_LEN
+                self.legacy_frame_count += 1
+            elif self.buffer[FRAME_LEN - 1] == FRAME_TAIL:
                 self.bad_channel_count += 1
                 self.skipped_bytes += 1
                 del self.buffer[0]
                 continue
+            else:
+                self.bad_tail_count += 1
+                self.skipped_bytes += 1
+                del self.buffer[0]
+                continue
 
-            del self.buffer[:FRAME_LEN]
+            candidate = bytes(self.buffer[:candidate_len])
+            del self.buffer[:candidate_len]
             parsed = parse_frame(candidate)
             frames.append(self._mark_continuity(parsed))
 

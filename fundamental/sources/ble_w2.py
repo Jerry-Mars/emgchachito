@@ -26,13 +26,17 @@ from fundamental.sources.base import SourceName, SourceWorker
 
 try:
     from bleak import BleakClient, BleakScanner
+    from bleak.exc import BleakBluetoothNotAvailableError
 except ImportError:  # pragma: no cover - depends on local runtime
     BleakClient = None
     BleakScanner = None
+    BleakBluetoothNotAvailableError = None
 
 
 DEFAULT_W2_DEVICE_NAME = "RunE W2"
-DEFAULT_W2_ADDRESS = "31:23:04:00:00:11"
+# The address in device_host_demo/main.py belongs to the demo unit. Scanning by
+# the advertised RunE W2 name is a safer default for a different physical unit.
+DEFAULT_W2_ADDRESS = ""
 DEFAULT_W2_NOTIFY_UUID = "0000FFF4-0000-1000-8000-00805F9B34FB"
 DEFAULT_W2_WRITE_UUID = "0000FFF3-0000-1000-8000-00805F9B34FB"
 DEFAULT_W2_SAMPLE_RATE_HZ = 1000.0
@@ -133,6 +137,10 @@ class BLEW2Worker(threading.Thread):
         )
         self._frames: list[SampleFrame] = []
         self._last_logged_parser_counters = (0, 0, 0)
+        self.notification_count = 0
+        self.rx_byte_count = 0
+        self.decoded_packet_count = 0
+        self._resolved_device = None
 
     def run(self) -> None:
         if BleakClient is None or BleakScanner is None:
@@ -142,7 +150,16 @@ class BLEW2Worker(threading.Thread):
         try:
             asyncio.run(self._run_async())
         except Exception as exc:  # pragma: no cover - hardware/event-loop dependent
-            self.event_queue.put(WorkerEvent("error", f"W2 BLE worker failed: {exc}"))
+            if BleakBluetoothNotAvailableError is not None and isinstance(
+                exc, BleakBluetoothNotAvailableError
+            ):
+                message = (
+                    "Bluetooth is unavailable or powered off. "
+                    "Turn on the Windows Bluetooth radio and retry."
+                )
+            else:
+                message = f"W2 BLE worker failed: {type(exc).__name__}: {exc}"
+            self.event_queue.put(WorkerEvent("error", message))
 
     async def _run_async(self) -> None:
         address = await self._resolve_address()
@@ -153,7 +170,9 @@ class BLEW2Worker(threading.Thread):
             self.event_queue.put(WorkerEvent("error", "No W2 BLE device matched the configured address/name."))
             return
 
-        async with BleakClient(address) as client:
+        # Reuse the BLEDevice returned by the scan. Passing only its address to
+        # BleakClient can trigger a second implicit discovery on Windows.
+        async with BleakClient(self._resolved_device or address) as client:
             self.event_queue.put(WorkerEvent("log", f"Connected to W2 BLE device {address}."))
             if self.stop_event.is_set():
                 self.event_queue.put(WorkerEvent("log", "W2 BLE start cancelled after connection."))
@@ -173,8 +192,24 @@ class BLEW2Worker(threading.Thread):
                 collection_started = True
                 self.event_queue.put(WorkerEvent("log", f"Started W2 collection mode {self.config.mode}."))
 
+                diagnostic_deadline = asyncio.get_running_loop().time() + 2.0
                 while not self.stop_event.is_set():
                     self._flush()
+                    now = asyncio.get_running_loop().time()
+                    if now >= diagnostic_deadline and self.decoded_packet_count == 0:
+                        self.event_queue.put(
+                            WorkerEvent(
+                                "log",
+                                "W2 collection started but no data frame has decoded: "
+                                f"notifications={self.notification_count}, rx_bytes={self.rx_byte_count}, "
+                                f"skipped={self.parser.skipped_bytes}, "
+                                f"unsupported={self.parser.unsupported_frame_count}, "
+                                f"bad_checksum={self.parser.bad_checksum_count}, "
+                                f"bad_tail={self.parser.bad_tail_count}, "
+                                f"bad_payload={self.parser.bad_payload_count}.",
+                            )
+                        )
+                        diagnostic_deadline = now + 5.0
                     await asyncio.sleep(0.05)
             finally:
                 if notify_started:
@@ -196,21 +231,47 @@ class BLEW2Worker(threading.Thread):
     async def _resolve_address(self) -> str | None:
         configured = self.config.address.strip()
         if configured:
-            return configured
-
-        devices = await BleakScanner.discover(timeout=self.config.scan_timeout_s)
-        matches = [
-            device
-            for device in devices
-            if getattr(device, "name", None) and self.config.device_name_filter in str(device.name)
-        ]
-        if not matches:
+            self.event_queue.put(
+                WorkerEvent("log", f"Scanning for configured W2 address {configured}...")
+            )
+            device = await BleakScanner.find_device_by_address(
+                configured, timeout=self.config.scan_timeout_s
+            )
+        else:
+            name_filter = self.config.device_name_filter
+            self.event_queue.put(
+                WorkerEvent("log", f"Scanning for BLE device name containing {name_filter!r}...")
+            )
+            folded_filter = name_filter.casefold()
+            device = await BleakScanner.find_device_by_filter(
+                lambda candidate, advertisement: (
+                    folded_filter in (candidate.name or "").casefold()
+                    or folded_filter in (advertisement.local_name or "").casefold()
+                ),
+                timeout=self.config.scan_timeout_s,
+            )
+        if device is None:
             return None
-        matches.sort(key=lambda device: getattr(device, "rssi", -999) or -999, reverse=True)
-        return str(matches[0].address)
+        self._resolved_device = device
+        self.event_queue.put(
+            WorkerEvent("log", f"Found W2 BLE device {device.name or '-'} at {device.address}.")
+        )
+        return str(device.address)
 
     def _handle_notification(self, _sender, received_data: bytearray) -> None:
-        for packet in self.parser.feed(bytes(received_data)):
+        self.notification_count += 1
+        self.rx_byte_count += len(received_data)
+        packets = self.parser.feed(bytes(received_data))
+        self.decoded_packet_count += len(packets)
+        if self.notification_count == 1:
+            preview = bytes(received_data[:32]).hex(" ")
+            self.event_queue.put(
+                WorkerEvent(
+                    "log",
+                    f"Received first W2 notification ({len(received_data)} bytes): {preview}",
+                )
+            )
+        for packet in packets:
             self._frames.extend(self.adapter.packet_to_frames(packet))
             if len(self._frames) >= self.max_frames_per_batch:
                 self._flush()
