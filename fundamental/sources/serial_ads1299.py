@@ -5,23 +5,48 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import ClassVar
+from dataclasses import asdict, dataclass, field
+from typing import Any, ClassVar
 
 from DeviceInterface.ads1299_protocol import ADS1299StreamParser, SAMPLE_RATE_HZ
 from fundamental.messages import (
     DEFAULT_MAX_FRAMES_PER_BATCH,
-    SampleBatch,
-    SampleFrame,
     SerialConfig,
     WorkerEvent,
 )
 from fundamental.sources.base import SourceName, SourceWorker
+from fundamental.streams import CaptureResumeState, FieldSpec, StreamBlock, StreamSpec
 
 try:
     import serial
 except ImportError:  # pragma: no cover - depends on local runtime
     serial = None
+
+
+ADS1299_STREAM_ID = "serial_ads1299.emg"
+ADS1299_STREAM_SPEC = StreamSpec(
+    stream_id=ADS1299_STREAM_ID,
+    display_name="ADS1299 EMG",
+    nominal_rate_hz=SAMPLE_RATE_HZ,
+    fields=(
+        FieldSpec("frame_counter", "Frame Counter", role="metadata", plottable=False),
+        FieldSpec("dropped_frames_before", "Dropped Before", role="metadata", plottable=False),
+        FieldSpec("emg_channel_count", "EMG Channel Count", role="metadata", plottable=False),
+        *tuple(
+            FieldSpec(
+                f"ch{index}_code",
+                f"CH {index}",
+                unit="code",
+                signal_kind="emg",
+                default_plot=True,
+                fixed_range=(-8388608.0, 8388607.0),
+            )
+            for index in range(1, 9)
+        ),
+    ),
+    active_signal_count_key="emg_channel_count",
+    time_source="device_counter_at_nominal_rate",
+)
 
 
 class SerialWorker(threading.Thread):
@@ -30,11 +55,10 @@ class SerialWorker(threading.Thread):
     def __init__(
         self,
         config: SerialConfig,
-        data_queue: queue.Queue[SampleBatch],
+        data_queue: queue.Queue[StreamBlock],
         event_queue: queue.Queue[WorkerEvent],
         stop_event: threading.Event,
-        timestamp_offset_s: float = 0.0,
-        expected_counter: int | None = None,
+        resume_state: CaptureResumeState = CaptureResumeState(),
         max_frames_per_batch: int = DEFAULT_MAX_FRAMES_PER_BATCH,
     ) -> None:
         super().__init__(name="SerialWorker", daemon=True)
@@ -42,12 +66,14 @@ class SerialWorker(threading.Thread):
         self.data_queue = data_queue
         self.event_queue = event_queue
         self.stop_event = stop_event
-        self.timestamp_offset_s = timestamp_offset_s
-        self.expected_counter = expected_counter
+        cursor = resume_state.cursor(ADS1299_STREAM_ID)
+        self.timestamp_offset_s = cursor.last_time_s if cursor is not None else 0.0
+        last_counter = cursor.value("frame_counter") if cursor is not None else None
+        self.expected_counter = int(last_counter) + 1 if last_counter is not None else None
         self.max_frames_per_batch = max(1, int(max_frames_per_batch))
         self._counter_origin: int | None = None
-        self._timestamp_origin_s = timestamp_offset_s
-        self._last_timestamp_s = timestamp_offset_s
+        self._timestamp_origin_s = self.timestamp_offset_s
+        self._last_timestamp_s = self.timestamp_offset_s
         self.parser = ADS1299StreamParser()
         self.rx_byte_count = 0
         self.parsed_frame_count = 0
@@ -65,6 +91,8 @@ class SerialWorker(threading.Thread):
             return
 
         serial_handle = None
+        times: list[float] = []
+        rows: list[tuple[int | float, ...]] = []
         try:
             serial_handle = serial.Serial(
                 self.config.port,
@@ -78,7 +106,6 @@ class SerialWorker(threading.Thread):
             self.event_queue.put(WorkerEvent("log", f"Opened serial port {self.config.display_text()}"))
 
             self.parser.expected_counter = self.expected_counter
-            frames: list[SampleFrame] = []
             logged_skipped_bytes = 0
             last_diagnostic_s = time.monotonic()
             first_frame_logged = False
@@ -93,7 +120,7 @@ class SerialWorker(threading.Thread):
                     return
 
                 if not chunk:
-                    self._flush(frames)
+                    self._flush(times, rows)
                     last_diagnostic_s = self._report_no_frames_if_due(last_diagnostic_s)
                     continue
 
@@ -130,22 +157,23 @@ class SerialWorker(threading.Thread):
                             )
                         )
                     timestamp = self._timestamp_for_counter(parsed_frame.counter)
-                    frames.append(
-                        SampleFrame(
-                            time_s=timestamp,
-                            counter=parsed_frame.counter,
-                            dropped_frames_before=parsed_frame.dropped_frames_before,
-                            values=parsed_frame.channels_code,
-                            emg_channel_count=parsed_frame.emg_channel_count,
+                    times.append(timestamp)
+                    rows.append(
+                        (
+                            parsed_frame.counter,
+                            parsed_frame.dropped_frames_before,
+                            parsed_frame.emg_channel_count,
+                            *parsed_frame.channels_code,
                         )
                     )
-                    if len(frames) >= self.max_frames_per_batch:
-                        self._flush(frames)
+                    if len(rows) >= self.max_frames_per_batch:
+                        self._flush(times, rows)
         except serial.SerialException as exc:
             self.event_queue.put(WorkerEvent("error", f"Failed to open serial port: {exc}"))
         except OSError as exc:
             self.event_queue.put(WorkerEvent("error", f"Failed to access serial device: {exc}"))
         finally:
+            self._flush(times, rows)
             self._close_handle(serial_handle)
 
     def _report_no_frames_if_due(self, last_report_s: float) -> float:
@@ -173,18 +201,22 @@ class SerialWorker(threading.Thread):
         )
         return now
 
-    def _flush(self, frames: list[SampleFrame]) -> None:
-        if not frames:
+    def _flush(self, times: list[float], rows: list[tuple[int | float, ...]]) -> None:
+        if not rows:
             return
-        self.data_queue.put(SampleBatch(tuple(frames)))
-        frames.clear()
+        self.data_queue.put(StreamBlock(ADS1299_STREAM_SPEC, tuple(times), tuple(rows)))
+        times.clear()
+        rows.clear()
 
     def _timestamp_for_counter(self, counter: int) -> float:
         if self._counter_origin is None:
             if self.expected_counter is None:
                 self._counter_origin = counter
             else:
-                self._counter_origin = self.expected_counter - 1
+                # A resumed capture uses an active-capture timeline: device frames
+                # produced while paused remain visible through the discontinuity
+                # counter, but do not create an artificial wall-clock gap.
+                self._counter_origin = counter - 1
             self._timestamp_origin_s = self.timestamp_offset_s
 
         elapsed_samples = counter - self._counter_origin
@@ -228,31 +260,35 @@ class SerialADS1299Source:
             "Transport handle: pyserial serial.Serial",
             "Protocol parser: DeviceInterface.ads1299_protocol.ADS1299StreamParser",
             "Device frame: current 35-byte and legacy 34-byte ADS1299 host frames are accepted",
-            "Worker output: SampleBatch(frames=tuple[SampleFrame, ...])",
-            "SampleFrame: time_s, counter, dropped_frames_before, emg_channel_count, values[8]",
+            "Worker output: StreamBlock(stream_id='serial_ads1299.emg')",
+            "Schema: time_s, frame_counter, dropped_frames_before, emg_channel_count, ch1_code..ch8_code",
             "Timing: host timestamps derived from device frame_counter and ADS1299 SAMPLE_RATE_HZ",
             f"Current config: {self.config.display_text()}",
         )
+
+    def stream_specs(self) -> tuple[StreamSpec, ...]:
+        return (ADS1299_STREAM_SPEC,)
+
+    def capture_metadata(self) -> dict[str, Any]:
+        return {"transport": "serial", "config": asdict(self.config)}
 
     def with_config(self, config: SerialConfig) -> "SerialADS1299Source":
         return SerialADS1299Source(config=config)
 
     def create_worker(
         self,
-        data_queue: queue.Queue[SampleBatch],
+        data_queue: queue.Queue[StreamBlock],
         event_queue: queue.Queue[WorkerEvent],
         stop_event: threading.Event,
-        timestamp_offset_s: float = 0.0,
-        expected_counter: int | None = None,
+        resume_state: CaptureResumeState = CaptureResumeState(),
     ) -> SourceWorker:
         return SerialWorker(
             config=self.config,
             data_queue=data_queue,
             event_queue=event_queue,
             stop_event=stop_event,
-            timestamp_offset_s=timestamp_offset_s,
-            expected_counter=expected_counter,
+            resume_state=resume_state,
         )
 
 
-__all__ = ["SerialADS1299Source", "SerialWorker"]
+__all__ = ["ADS1299_STREAM_SPEC", "SerialADS1299Source", "SerialWorker"]

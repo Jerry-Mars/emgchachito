@@ -157,7 +157,7 @@ def _refresh_status(controller: AcquisitionController) -> None:
     state = controller.state.value.upper()
     dpg.set_value(
         STATUS_TEXT_TAG,
-        f"State: {state} | Samples: {controller.buffer.frame_count}",
+        f"State: {state} | Rows: {controller.buffer.row_count}",
     )
     dpg.set_value(CONFIG_TEXT_TAG, f"Source: {controller.source_display_text()}")
     _sync_save_path(controller)
@@ -166,7 +166,7 @@ def _refresh_status(controller: AcquisitionController) -> None:
     _configure_if_exists(START_BUTTON_TAG, enabled=not running)
     _configure_if_exists(PAUSE_BUTTON_TAG, enabled=running)
     _configure_if_exists(STOP_BUTTON_TAG, enabled=controller.state != AcquisitionState.STOPPED)
-    _configure_if_exists(SAVE_BUTTON_TAG, enabled=not running and controller.buffer.frame_count > 0)
+    _configure_if_exists(SAVE_BUTTON_TAG, enabled=not running and controller.buffer.row_count > 0)
 
 
 def _save_path_from_window(controller: AcquisitionController) -> str:

@@ -9,8 +9,13 @@ from types import SimpleNamespace
 
 from DeviceInterface.w2_protocol import W2CommandBuilder, W2RawPacket, W2RmsPacket, W2StreamParser
 import fundamental.sources.ble_w2 as ble_w2_module
-from fundamental.messages import CHANNEL_COUNT
-from fundamental.sources.ble_w2 import BLEW2Source, BLEW2Worker, W2BLEConfig, W2SampleAdapter
+from fundamental.sources.ble_w2 import (
+    BLEW2Source,
+    BLEW2Worker,
+    W2BLEConfig,
+    W2StreamAdapter,
+    w2_stream_spec,
+)
 
 
 def make_w2_raw_frame(mode: int, initial: float, deltas: tuple[int, ...]) -> bytes:
@@ -102,20 +107,15 @@ class W2StreamParserTests(unittest.TestCase):
         self.assertEqual(packets[0].rms, 11)
 
 
-class W2SampleAdapterTests(unittest.TestCase):
-    def test_adapter_pads_w2_single_channel_samples_for_existing_buffer(self) -> None:
-        adapter = W2SampleAdapter(sample_rate_hz=1000.0)
-        frames = adapter.packet_to_frames(W2RawPacket(W2CommandBuilder.MODE_EMG_RAW, (1.2, 2.7)))
+class W2StreamAdapterTests(unittest.TestCase):
+    def test_adapter_keeps_one_native_value_series_without_zero_padding(self) -> None:
+        config = W2BLEConfig(sample_rate_hz=1000.0)
+        adapter = W2StreamAdapter(w2_stream_spec(config), sample_rate_hz=1000.0)
+        block = adapter.packet_to_block(W2RawPacket(W2CommandBuilder.MODE_EMG_RAW, (1.2, 2.7)))
 
-        self.assertEqual(len(frames), 2)
-        self.assertEqual(frames[0].counter, 0)
-        self.assertEqual(frames[0].time_s, 0.0)
-        self.assertEqual(frames[1].counter, 1)
-        self.assertEqual(frames[1].time_s, 0.001)
-        self.assertEqual(frames[0].emg_channel_count, 1)
-        self.assertEqual(len(frames[0].values), CHANNEL_COUNT)
-        self.assertEqual(frames[0].values, (1, 0, 0, 0, 0, 0, 0, 0))
-        self.assertEqual(frames[1].values, (3, 0, 0, 0, 0, 0, 0, 0))
+        self.assertEqual(block.time_s, (0.0, 0.001))
+        self.assertEqual(block.rows, ((1.2,), (2.7,)))
+        self.assertEqual(block.spec.stream_id, "ble_w2.signal")
 
 
 class BLEW2SourceTests(unittest.TestCase):
@@ -246,7 +246,7 @@ class BLEW2WorkerTests(unittest.TestCase):
         self.assertEqual(event_queue.qsize(), 1)
         self.assertIn("bad_checksum=1", event_queue.get_nowait().message)
 
-    def test_stop_client_flushes_frames_even_when_cleanup_commands_fail(self) -> None:
+    def test_stop_client_flushes_rows_even_when_cleanup_commands_fail(self) -> None:
         data_queue: queue.Queue = queue.Queue()
         event_queue: queue.Queue = queue.Queue()
         worker = BLEW2Worker(
@@ -255,12 +255,14 @@ class BLEW2WorkerTests(unittest.TestCase):
             event_queue=event_queue,
             stop_event=threading.Event(),
         )
-        worker._frames.extend(W2SampleAdapter().packet_to_frames(W2RmsPacket(42)))
+        block = worker.adapter.packet_to_block(W2RmsPacket(42))
+        worker._times.extend(block.time_s)
+        worker._rows.extend(block.rows)
 
         asyncio.run(worker._stop_client(FailingStopClient()))
 
         batch = data_queue.get_nowait()
-        self.assertEqual(batch.frames[0].values[0], 42)
+        self.assertEqual(batch.rows[0][0], 42.0)
         messages = [event_queue.get_nowait().message for _ in range(event_queue.qsize())]
         self.assertTrue(any("Failed to send W2 stop command" in message for message in messages))
         self.assertTrue(any("Failed to stop W2 notifications" in message for message in messages))

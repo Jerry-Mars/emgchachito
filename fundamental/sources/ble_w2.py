@@ -1,28 +1,20 @@
-"""BLE source for the RunE W2 demo device.
-
-The module keeps BLE transport separate from the W2 byte protocol. It currently
-emits the existing SampleBatch contract as a compatibility bridge; the W2 packet
-and parser types are intentionally independent so they can later feed a
-SignalBlock adapter directly.
-"""
+"""BLE source for the RunE W2 demo device."""
 
 from __future__ import annotations
 
 import asyncio
 import queue
 import threading
-from dataclasses import dataclass, field
-from typing import ClassVar, Literal
+from dataclasses import asdict, dataclass, field
+from typing import Any, ClassVar, Literal
 
-from DeviceInterface.w2_protocol import W2CommandBuilder, W2Packet, W2RawPacket, W2RmsPacket, W2StreamParser
+from DeviceInterface.w2_protocol import W2CommandBuilder, W2Packet, W2RmsPacket, W2StreamParser
 from fundamental.messages import (
-    CHANNEL_COUNT,
     DEFAULT_MAX_FRAMES_PER_BATCH,
-    SampleBatch,
-    SampleFrame,
     WorkerEvent,
 )
 from fundamental.sources.base import SourceName, SourceWorker
+from fundamental.streams import CaptureResumeState, FieldSpec, StreamBlock, StreamSpec
 
 try:
     from bleak import BleakClient, BleakScanner
@@ -41,6 +33,7 @@ DEFAULT_W2_NOTIFY_UUID = "0000FFF4-0000-1000-8000-00805F9B34FB"
 DEFAULT_W2_WRITE_UUID = "0000FFF3-0000-1000-8000-00805F9B34FB"
 DEFAULT_W2_SAMPLE_RATE_HZ = 1000.0
 W2_MODE_NAMES = ("emg_raw", "emg_rms", "eeg_raw")
+W2_STREAM_ID = "ble_w2.signal"
 
 
 @dataclass(frozen=True)
@@ -72,55 +65,75 @@ class W2BLEConfig:
         return f"W2 BLE {target}, notify {self.notify_uuid}, write {self.write_uuid}, mode {self.mode}"
 
 
-class W2SampleAdapter:
-    """Temporary W2 packet to SampleBatch bridge.
+def w2_stream_spec(config: W2BLEConfig) -> StreamSpec:
+    kind = {
+        "emg_raw": "emg",
+        "emg_rms": "generic",
+        "eeg_raw": "eeg",
+    }[config.mode]
+    label = {
+        "emg_raw": "EMG Raw",
+        "emg_rms": "EMG RMS",
+        "eeg_raw": "EEG Raw",
+    }[config.mode]
+    return StreamSpec(
+        stream_id=W2_STREAM_ID,
+        display_name=f"W2 {label}",
+        nominal_rate_hz=config.sample_rate_hz,
+        fields=(
+            FieldSpec(
+                "value",
+                label,
+                unit="code",
+                signal_kind=kind,
+                default_plot=True,
+            ),
+        ),
+        time_source="host_generated_at_configured_rate",
+    )
 
-    W2 values are rounded and padded into the current fixed-width SampleFrame
-    format. This keeps the source usable before SignalBlock replaces the
-    ADS-shaped sample contract.
-    """
+
+class W2StreamAdapter:
+    """Convert parsed W2 packets to the generic stream contract."""
 
     def __init__(
         self,
+        spec: StreamSpec,
         sample_rate_hz: float = DEFAULT_W2_SAMPLE_RATE_HZ,
-        timestamp_offset_s: float = 0.0,
-        expected_counter: int | None = None,
+        resume_state: CaptureResumeState = CaptureResumeState(),
     ) -> None:
+        self.spec = spec
         self.sample_rate_hz = max(0.001, float(sample_rate_hz))
-        self._next_counter = 0 if expected_counter is None else int(expected_counter)
-        self._counter_origin = 0 if expected_counter is None else int(expected_counter) - 1
-        self._timestamp_origin_s = float(timestamp_offset_s)
-
-    def packet_to_frames(self, packet: W2Packet) -> list[SampleFrame]:
-        if isinstance(packet, W2RmsPacket):
-            return [self._sample_frame(float(packet.rms))]
-        return [self._sample_frame(value) for value in packet.values]
-
-    def _sample_frame(self, value: float) -> SampleFrame:
-        counter = self._next_counter
-        self._next_counter += 1
-        timestamp = self._timestamp_origin_s + (counter - self._counter_origin) / self.sample_rate_hz
-        first_channel = int(round(value))
-        return SampleFrame(
-            time_s=timestamp,
-            counter=counter,
-            dropped_frames_before=0,
-            values=(first_channel,) + tuple(0 for _ in range(CHANNEL_COUNT - 1)),
-            emg_channel_count=1,
+        cursor = resume_state.cursor(spec.stream_id)
+        self._next_time_s = (
+            cursor.last_time_s + 1.0 / self.sample_rate_hz
+            if cursor is not None
+            else 0.0
         )
+
+    def packet_to_block(self, packet: W2Packet) -> StreamBlock:
+        if isinstance(packet, W2RmsPacket):
+            values = (float(packet.rms),)
+        else:
+            values = tuple(float(value) for value in packet.values)
+        times = tuple(
+            self._next_time_s + index / self.sample_rate_hz
+            for index in range(len(values))
+        )
+        self._next_time_s += len(values) / self.sample_rate_hz
+        return StreamBlock(self.spec, times, tuple((value,) for value in values))
 
 
 class BLEW2Worker(threading.Thread):
-    """Connect to a W2 BLE device and publish SampleBatch objects."""
+    """Connect to a W2 BLE device and publish StreamBlock objects."""
 
     def __init__(
         self,
         config: W2BLEConfig,
-        data_queue: queue.Queue[SampleBatch],
+        data_queue: queue.Queue[StreamBlock],
         event_queue: queue.Queue[WorkerEvent],
         stop_event: threading.Event,
-        timestamp_offset_s: float = 0.0,
-        expected_counter: int | None = None,
+        resume_state: CaptureResumeState = CaptureResumeState(),
         max_frames_per_batch: int = DEFAULT_MAX_FRAMES_PER_BATCH,
     ) -> None:
         super().__init__(name="BLEW2Worker", daemon=True)
@@ -130,12 +143,14 @@ class BLEW2Worker(threading.Thread):
         self.stop_event = stop_event
         self.max_frames_per_batch = max(1, int(max_frames_per_batch))
         self.parser = W2StreamParser()
-        self.adapter = W2SampleAdapter(
+        self.spec = w2_stream_spec(config)
+        self.adapter = W2StreamAdapter(
+            spec=self.spec,
             sample_rate_hz=config.sample_rate_hz,
-            timestamp_offset_s=timestamp_offset_s,
-            expected_counter=expected_counter,
+            resume_state=resume_state,
         )
-        self._frames: list[SampleFrame] = []
+        self._times: list[float] = []
+        self._rows: list[tuple[int | float, ...]] = []
         self._last_logged_parser_counters = (0, 0, 0)
         self.notification_count = 0
         self.rx_byte_count = 0
@@ -272,8 +287,10 @@ class BLEW2Worker(threading.Thread):
                 )
             )
         for packet in packets:
-            self._frames.extend(self.adapter.packet_to_frames(packet))
-            if len(self._frames) >= self.max_frames_per_batch:
+            block = self.adapter.packet_to_block(packet)
+            self._times.extend(block.time_s)
+            self._rows.extend(block.rows)
+            if len(self._rows) >= self.max_frames_per_batch:
                 self._flush()
 
         self._log_parser_counters_if_changed()
@@ -300,10 +317,11 @@ class BLEW2Worker(threading.Thread):
             )
 
     def _flush(self) -> None:
-        if not self._frames:
+        if not self._rows:
             return
-        self.data_queue.put(SampleBatch(tuple(self._frames)))
-        self._frames.clear()
+        self.data_queue.put(StreamBlock(self.spec, tuple(self._times), tuple(self._rows)))
+        self._times.clear()
+        self._rows.clear()
 
 
 @dataclass(frozen=True)
@@ -327,30 +345,33 @@ class BLEW2Source:
             "Transport handle: bleak BleakClient",
             "Protocol parser: DeviceInterface.w2_protocol.W2StreamParser",
             "Device frame: W2 BLE notify frame -> W2RawPacket or W2RmsPacket",
-            "Worker output: SampleBatch(frames=tuple[SampleFrame, ...])",
-            "SampleFrame bridge: W2 value goes to values[0], remaining channels padded with 0",
-            "Active channel count: emg_channel_count=1 until SignalBlock replaces the bridge",
+            "Worker output: StreamBlock(stream_id='ble_w2.signal')",
+            "Schema: time_s, value (no ADS-shaped zero padding)",
             f"Current config: {self.config.display_text()}",
         )
+
+    def stream_specs(self) -> tuple[StreamSpec, ...]:
+        return (w2_stream_spec(self.config),)
+
+    def capture_metadata(self) -> dict[str, Any]:
+        return {"transport": "ble", "config": asdict(self.config)}
 
     def with_config(self, config: W2BLEConfig) -> "BLEW2Source":
         return BLEW2Source(config=config)
 
     def create_worker(
         self,
-        data_queue: queue.Queue[SampleBatch],
+        data_queue: queue.Queue[StreamBlock],
         event_queue: queue.Queue[WorkerEvent],
         stop_event: threading.Event,
-        timestamp_offset_s: float = 0.0,
-        expected_counter: int | None = None,
+        resume_state: CaptureResumeState = CaptureResumeState(),
     ) -> SourceWorker:
         return BLEW2Worker(
             config=self.config,
             data_queue=data_queue,
             event_queue=event_queue,
             stop_event=stop_event,
-            timestamp_offset_s=timestamp_offset_s,
-            expected_counter=expected_counter,
+            resume_state=resume_state,
         )
 
 
@@ -358,5 +379,6 @@ __all__ = [
     "BLEW2Source",
     "BLEW2Worker",
     "W2BLEConfig",
-    "W2SampleAdapter",
+    "W2StreamAdapter",
+    "w2_stream_spec",
 ]

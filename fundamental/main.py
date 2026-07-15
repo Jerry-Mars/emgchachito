@@ -1,4 +1,4 @@
-"""Entry point for the fundamental serial acquisition GUI."""
+"""Entry point for the multi-source fundamental acquisition GUI."""
 
 from __future__ import annotations
 

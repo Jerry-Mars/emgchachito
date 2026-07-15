@@ -12,6 +12,7 @@ from fundamental.commands import CommandContext, CommandSpec
 from fundamental.messages import AcquisitionState
 from fundamental.sources.base import SourceName
 from fundamental.sources.ble_w2 import BLEW2Source, W2_MODE_NAMES
+from fundamental.sources.myo import MyoSource
 from fundamental.sources.serial_ads1299 import SerialADS1299Source
 from fundamental.window_manager import ManagedWindow
 
@@ -30,12 +31,20 @@ W2_WRITE_UUID_INPUT_TAG = "fundamental.source_config.w2_write_uuid"
 W2_MODE_INPUT_TAG = "fundamental.source_config.w2_mode"
 W2_SAMPLE_RATE_INPUT_TAG = "fundamental.source_config.w2_sample_rate"
 W2_SCAN_TIMEOUT_INPUT_TAG = "fundamental.source_config.w2_scan_timeout"
+MYO_GROUP_TAG = "fundamental.source_config.myo_group"
+MYO_ADDRESS_INPUT_TAG = "fundamental.source_config.myo_address"
+MYO_NAME_FILTER_INPUT_TAG = "fundamental.source_config.myo_name_filter"
+MYO_SCAN_TIMEOUT_INPUT_TAG = "fundamental.source_config.myo_scan_timeout"
+MYO_CONNECT_TIMEOUT_INPUT_TAG = "fundamental.source_config.myo_connect_timeout"
+MYO_ENABLE_EMG_TAG = "fundamental.source_config.myo_enable_emg"
+MYO_ENABLE_IMU_TAG = "fundamental.source_config.myo_enable_imu"
 SUMMARY_TEXT_TAG = "fundamental.source_config.summary"
 INSPECTION_LIST_TAG = "fundamental.source_config.inspection"
 
 SOURCE_LABELS: dict[SourceName, str] = {
     SerialADS1299Source.name: SerialADS1299Source.display_name,
     BLEW2Source.name: BLEW2Source.display_name,
+    MyoSource.name: MyoSource.display_name,
 }
 SOURCE_NAMES_BY_LABEL = {label: name for name, label in SOURCE_LABELS.items()}
 
@@ -99,6 +108,26 @@ def _build_window(app: FundamentalApp, controller: AcquisitionController) -> Non
             dpg.add_input_float(tag=W2_SAMPLE_RATE_INPUT_TAG, label="Sample Rate (Hz)", width=220, step=10.0)
             dpg.add_input_float(tag=W2_SCAN_TIMEOUT_INPUT_TAG, label="Scan Timeout (s)", width=220, step=0.5)
 
+        with dpg.group(tag=MYO_GROUP_TAG):
+            dpg.add_text("Myo Armband BLE")
+            dpg.add_input_text(tag=MYO_ADDRESS_INPUT_TAG, label="Address", width=340)
+            dpg.add_input_text(tag=MYO_NAME_FILTER_INPUT_TAG, label="Name Filter", width=340)
+            dpg.add_input_float(
+                tag=MYO_SCAN_TIMEOUT_INPUT_TAG,
+                label="Scan Timeout (s)",
+                width=220,
+                step=0.5,
+            )
+            dpg.add_input_float(
+                tag=MYO_CONNECT_TIMEOUT_INPUT_TAG,
+                label="Connect Timeout (s)",
+                width=220,
+                step=0.5,
+            )
+            with dpg.group(horizontal=True):
+                dpg.add_checkbox(label="EMG", tag=MYO_ENABLE_EMG_TAG, default_value=True)
+                dpg.add_checkbox(label="IMU", tag=MYO_ENABLE_IMU_TAG, default_value=True)
+
         dpg.add_spacer(height=8)
         dpg.add_button(
             label="Apply",
@@ -128,7 +157,7 @@ def _apply_from_window(app: FundamentalApp, controller: AcquisitionController) -
             baud_rate=int(dpg.get_value(SERIAL_BAUD_INPUT_TAG)),
             timeout_s=float(dpg.get_value(SERIAL_TIMEOUT_INPUT_TAG)),
         )
-    else:
+    elif source_name == BLEW2Source.name:
         error = controller.update_w2_config(
             address=str(dpg.get_value(W2_ADDRESS_INPUT_TAG)).strip(),
             device_name_filter=str(dpg.get_value(W2_NAME_FILTER_INPUT_TAG)).strip(),
@@ -137,6 +166,15 @@ def _apply_from_window(app: FundamentalApp, controller: AcquisitionController) -
             mode=str(dpg.get_value(W2_MODE_INPUT_TAG)).strip(),
             sample_rate_hz=float(dpg.get_value(W2_SAMPLE_RATE_INPUT_TAG)),
             scan_timeout_s=float(dpg.get_value(W2_SCAN_TIMEOUT_INPUT_TAG)),
+        )
+    else:
+        error = controller.update_myo_config(
+            address=str(dpg.get_value(MYO_ADDRESS_INPUT_TAG)).strip(),
+            device_name_filter=str(dpg.get_value(MYO_NAME_FILTER_INPUT_TAG)).strip(),
+            scan_timeout_s=float(dpg.get_value(MYO_SCAN_TIMEOUT_INPUT_TAG)),
+            connect_timeout_s=float(dpg.get_value(MYO_CONNECT_TIMEOUT_INPUT_TAG)),
+            enable_emg=bool(dpg.get_value(MYO_ENABLE_EMG_TAG)),
+            enable_imu=bool(dpg.get_value(MYO_ENABLE_IMU_TAG)),
         )
 
     if error:
@@ -172,6 +210,14 @@ def _sync_window(controller: AcquisitionController) -> None:
     dpg.set_value(W2_SAMPLE_RATE_INPUT_TAG, w2_config.sample_rate_hz)
     dpg.set_value(W2_SCAN_TIMEOUT_INPUT_TAG, w2_config.scan_timeout_s)
 
+    myo_config = controller.myo_config
+    dpg.set_value(MYO_ADDRESS_INPUT_TAG, myo_config.address)
+    dpg.set_value(MYO_NAME_FILTER_INPUT_TAG, myo_config.device_name_filter)
+    dpg.set_value(MYO_SCAN_TIMEOUT_INPUT_TAG, myo_config.scan_timeout_s)
+    dpg.set_value(MYO_CONNECT_TIMEOUT_INPUT_TAG, myo_config.connect_timeout_s)
+    dpg.set_value(MYO_ENABLE_EMG_TAG, myo_config.enable_emg)
+    dpg.set_value(MYO_ENABLE_IMU_TAG, myo_config.enable_imu)
+
     dpg.set_value(SUMMARY_TEXT_TAG, f"Active: {controller.source_display_text()}")
     _refresh_source_groups(controller)
 
@@ -180,6 +226,7 @@ def _refresh_source_groups(controller: AcquisitionController) -> None:
     selected = _selected_source_name(controller)
     _configure_if_exists(SERIAL_GROUP_TAG, show=selected == SerialADS1299Source.name)
     _configure_if_exists(W2_GROUP_TAG, show=selected == BLEW2Source.name)
+    _configure_if_exists(MYO_GROUP_TAG, show=selected == MyoSource.name)
     _refresh_inspection(controller)
 
 
@@ -188,7 +235,7 @@ def _refresh_inspection(controller: AcquisitionController) -> None:
         return
 
     selected = _selected_source_name(controller)
-    source = controller.w2_source if selected == BLEW2Source.name else controller.serial_source
+    source = controller.configured_source(selected)
     dpg.delete_item(INSPECTION_LIST_TAG, children_only=True)
     for line in source.inspect_data():
         dpg.add_text(line, parent=INSPECTION_LIST_TAG)

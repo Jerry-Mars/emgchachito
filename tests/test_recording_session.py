@@ -4,9 +4,11 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from fundamental.messages import AcquisitionState, SampleBatch, SampleFrame
+from fundamental.capture_store import CaptureStore
+from fundamental.messages import AcquisitionState
 from fundamental.recording_session import RecordingSession
-from fundamental.signal_buffer import SignalBuffer
+from fundamental.sources.serial_ads1299 import ADS1299_STREAM_SPEC
+from fundamental.streams import StreamBlock
 from fundamental.stimulus_model import StimulusController, StimulusEvent, StimulusState
 
 
@@ -16,7 +18,7 @@ VALUES = (1, 2, 3, 4, 5, 6, 7, 8)
 class FakeAcquisition:
     def __init__(self) -> None:
         self.state = AcquisitionState.STOPPED
-        self.buffer = SignalBuffer(plot_buffer_size=16)
+        self.buffer = CaptureStore(plot_buffer_size=16, stream_specs=(ADS1299_STREAM_SPEC,))
         self.last_save_path = "captures/fake.csv"
         self.fail_on_drain = False
         self.save_calls: list[dict[str, Any]] = []
@@ -63,8 +65,12 @@ class FakeAcquisition:
 
 
 def append_frame(acquisition: FakeAcquisition, time_s: float, counter: int = 1) -> None:
-    acquisition.buffer.append_batch(
-        SampleBatch((SampleFrame(time_s, counter, 0, VALUES, emg_channel_count=4),))
+    acquisition.buffer.append_block(
+        StreamBlock(
+            ADS1299_STREAM_SPEC,
+            (time_s,),
+            ((counter, 0, 4, *VALUES),),
+        )
     )
 
 

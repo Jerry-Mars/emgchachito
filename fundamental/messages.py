@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal
-
-from DeviceInterface.ads1299_protocol import CHANNEL_COUNT
+from typing import Any, Literal, Mapping
 
 DEFAULT_SERIAL_PORT = "COM5"
 DEFAULT_BAUD_RATE = 921600
@@ -44,26 +42,9 @@ class SerialConfig:
 
 
 @dataclass(frozen=True)
-class SampleFrame:
-    """One timestamped multi-channel sample."""
-
-    time_s: float
-    counter: int
-    dropped_frames_before: int
-    values: tuple[int, ...]
-    emg_channel_count: int = CHANNEL_COUNT
-
-
-@dataclass(frozen=True)
-class SampleBatch:
-    """Batch of samples sent from the worker to the UI thread."""
-
-    frames: tuple[SampleFrame, ...]
-
-
-@dataclass(frozen=True)
 class WorkerEvent:
     """Status or failure event emitted by a worker."""
 
-    kind: Literal["log", "error"]
-    message: str
+    kind: Literal["log", "error", "metadata"]
+    message: str = ""
+    data: Mapping[str, Any] | None = None

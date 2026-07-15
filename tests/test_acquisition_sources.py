@@ -5,9 +5,11 @@ import threading
 import unittest
 
 from fundamental.acquisition import AcquisitionController
-from fundamental.messages import AcquisitionState, SampleBatch, SerialConfig, WorkerEvent
+from fundamental.messages import AcquisitionState, SerialConfig, WorkerEvent
 from fundamental.sources.ble_w2 import BLEW2Source
-from fundamental.sources.serial_ads1299 import SerialADS1299Source
+from fundamental.sources.myo import MyoSource
+from fundamental.sources.serial_ads1299 import ADS1299_STREAM_SPEC, SerialADS1299Source
+from fundamental.streams import CaptureResumeState, StreamBlock, StreamSpec
 
 
 class FakeWorker:
@@ -40,20 +42,24 @@ class FakeSource:
     def inspect_data(self) -> tuple[str, ...]:
         return ("Fake inspection",)
 
+    def stream_specs(self) -> tuple[StreamSpec, ...]:
+        return (ADS1299_STREAM_SPEC,)
+
+    def capture_metadata(self) -> dict[str, object]:
+        return {"fake": True}
+
     def create_worker(
         self,
-        data_queue: queue.Queue[SampleBatch],
+        data_queue: queue.Queue[StreamBlock],
         event_queue: queue.Queue[WorkerEvent],
         stop_event: threading.Event,
-        timestamp_offset_s: float = 0.0,
-        expected_counter: int | None = None,
+        resume_state: CaptureResumeState = CaptureResumeState(),
     ) -> FakeWorker:
         self.created_with = {
             "data_queue": data_queue,
             "event_queue": event_queue,
             "stop_event": stop_event,
-            "timestamp_offset_s": timestamp_offset_s,
-            "expected_counter": expected_counter,
+            "resume_state": resume_state,
         }
         return self.worker
 
@@ -142,12 +148,32 @@ class AcquisitionSourceTests(unittest.TestCase):
     def test_sources_expose_data_inspection_text(self) -> None:
         serial_lines = SerialADS1299Source().inspect_data()
         w2_lines = BLEW2Source().inspect_data()
+        myo_lines = MyoSource().inspect_data()
 
         self.assertTrue(any("SerialWorker" in line for line in serial_lines))
         self.assertTrue(any("ADS1299StreamParser" in line for line in serial_lines))
         self.assertTrue(any("BLEW2Worker" in line for line in w2_lines))
         self.assertTrue(any("W2StreamParser" in line for line in w2_lines))
-        self.assertTrue(any("SampleFrame" in line for line in w2_lines))
+        self.assertTrue(any("StreamBlock" in line for line in w2_lines))
+        self.assertTrue(any("MyoWorker" in line for line in myo_lines))
+
+    def test_myo_config_requires_one_stream(self) -> None:
+        controller = AcquisitionController()
+
+        self.assertEqual(
+            controller.update_myo_config(enable_emg=False, enable_imu=False),
+            "Enable at least one Myo data stream.",
+        )
+        self.assertIsNone(
+            controller.update_myo_config(
+                address=" AA:BB ",
+                enable_emg=True,
+                enable_imu=False,
+            )
+        )
+        self.assertEqual(controller.myo_config.address, "AA:BB")
+        self.assertTrue(controller.myo_config.enable_emg)
+        self.assertFalse(controller.myo_config.enable_imu)
 
 
 if __name__ == "__main__":

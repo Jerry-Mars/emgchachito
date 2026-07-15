@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import queue
 import threading
-from typing import Literal, Protocol
+from typing import Any, Protocol, TypeAlias
 
-from fundamental.messages import SampleBatch, WorkerEvent
+from fundamental.messages import WorkerEvent
+from fundamental.streams import CaptureResumeState, StreamBlock, StreamSpec
 
-SourceName = Literal["serial_ads1299", "ble_w2"]
+SourceName: TypeAlias = str
 
 
 class SourceWorker(Protocol):
     """Minimal shape expected by AcquisitionController-like lifecycle code."""
 
-    data_queue: queue.Queue[SampleBatch]
+    data_queue: queue.Queue[StreamBlock]
     event_queue: queue.Queue[WorkerEvent]
     stop_event: threading.Event
 
@@ -35,11 +36,14 @@ class AcquisitionSource(Protocol):
 
     def inspect_data(self) -> tuple[str, ...]: ...
 
+    def stream_specs(self) -> tuple[StreamSpec, ...]: ...
+
+    def capture_metadata(self) -> dict[str, Any]: ...
+
     def create_worker(
         self,
-        data_queue: queue.Queue[SampleBatch],
+        data_queue: queue.Queue[StreamBlock],
         event_queue: queue.Queue[WorkerEvent],
         stop_event: threading.Event,
-        timestamp_offset_s: float = 0.0,
-        expected_counter: int | None = None,
+        resume_state: CaptureResumeState = CaptureResumeState(),
     ) -> SourceWorker: ...

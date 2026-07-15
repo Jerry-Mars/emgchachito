@@ -1,311 +1,40 @@
 digraph AcquisitionArchitecture {
-  graph [
-    rankdir=LR,
-    bgcolor="white",
-    fontname="Arial",
-    fontsize=12,
-    pad=0.35,
-    nodesep=0.45,
-    ranksep=0.8,
-    splines=ortho,
-    compound=true,
-    label="fundamental/acquisition.py architecture",
-    labelloc=t,
-    labeljust=l
-  ];
+  graph [rankdir=LR, bgcolor="white", pad=0.25, nodesep=0.45, ranksep=0.7];
+  node [shape=box, style="rounded,filled", fontname="Arial", fontsize=10,
+        color="#64748b", fillcolor="#f8fafc"];
+  edge [color="#64748b", fontname="Arial", fontsize=9];
 
-  node [
-    shape=box,
-    style="rounded,filled",
-    fontname="Arial",
-    fontsize=10,
-    color="#334155",
-    penwidth=1.2,
-    fillcolor="#f8fafc",
-    margin="0.10,0.07"
-  ];
-
-  edge [
-    fontname="Arial",
-    fontsize=9,
-    color="#334155",
-    arrowsize=0.75,
-    penwidth=1.2
-  ];
-
-  subgraph cluster_external {
-    label="External callers / API exposed by AcquisitionController";
-    color="#64748b";
-    penwidth=1.4;
-    style="rounded,dashed";
-
-    ui [
-      label="GUI blocks\nRecordingSession\nTests",
-      shape=component,
-      fillcolor="#eff6ff",
-      color="#2563eb"
-    ];
-
-    update_config [label="update_config(...)", fillcolor="#e0f2fe"];
-    start [label="start()", fillcolor="#e0f2fe"];
-    pause [label="pause()", fillcolor="#e0f2fe"];
-    stop [label="stop()", fillcolor="#e0f2fe"];
-    save [label="save(path,\nstimulus resolver,\nstimulus log rows)", fillcolor="#e0f2fe"];
-    drain [label="drain_queues(log_sink,\nmax_batches)", fillcolor="#e0f2fe"];
-    shutdown [label="shutdown()", fillcolor="#e0f2fe"];
+  subgraph cluster_sources {
+    label="Protocol-specific sources";
+    color="#cbd5e1";
+    ads [label="SerialADS1299Source\nparser + device counter", fillcolor="#e0f2fe"];
+    w2 [label="BLEW2Source\nparser + configured rate", fillcolor="#e0f2fe"];
+    myo [label="MyoSource\npymyo + EMG/IMU callbacks", fillcolor="#e0f2fe"];
   }
 
-  subgraph cluster_controller {
-    label="AcquisitionController";
-    color="#0f766e";
-    penwidth=1.6;
-    style="rounded";
+  schema [label="StreamSpec + FieldSpec\nrate, time source, columns, plot hints",
+          fillcolor="#ede9fe"];
+  block [label="StreamBlock\none independently sampled stream", fillcolor="#ede9fe"];
+  controller [label="AcquisitionController\nlifecycle + queues + session metadata",
+              fillcolor="#dcfce7"];
+  store [label="CaptureStore\nfull rows + bounded series windows", fillcolor="#dcfce7"];
+  plot [label="Plot window\ngeneric series provider", fillcolor="#fef3c7"];
+  future [label="Future 3D / analysis view\nquery only required IMU series", fillcolor="#fef3c7"];
+  csv [label="Schema-driven CSV writer\none raw file per populated stream", fillcolor="#fee2e2"];
+  meta [label="Capture metadata JSON\nshared session + schemas + timing", fillcolor="#fee2e2"];
 
-    ctrl_state [
-      label="state\nAcquisitionState",
-      shape=cylinder,
-      fillcolor="#ccfbf1",
-      color="#0f766e"
-    ];
-    ctrl_config [
-      label="config\nSerialConfig",
-      shape=cylinder,
-      fillcolor="#ccfbf1",
-      color="#0f766e"
-    ];
-    ctrl_buffer [
-      label="buffer\nSignalBuffer",
-      shape=cylinder,
-      fillcolor="#ccfbf1",
-      color="#0f766e"
-    ];
-    ctrl_save_path [
-      label="last_save_path",
-      shape=cylinder,
-      fillcolor="#ccfbf1",
-      color="#0f766e"
-    ];
-
-    data_queue [
-      label="data_queue\nQueue[SampleBatch]",
-      shape=folder,
-      fillcolor="#ecfeff",
-      color="#0891b2"
-    ];
-    event_queue [
-      label="event_queue\nQueue[WorkerEvent]",
-      shape=folder,
-      fillcolor="#fef3c7",
-      color="#d97706"
-    ];
-    stop_event [
-      label="stop_event\nthreading.Event",
-      shape=hexagon,
-      fillcolor="#fee2e2",
-      color="#dc2626"
-    ];
-    worker_ref [
-      label="worker\nSerialWorker | None",
-      shape=component,
-      fillcolor="#f1f5f9"
-    ];
-
-    c_start [
-      label="start()\nreset/resume\nclear queues\nspawn worker\nstate=RUNNING",
-      fillcolor="#dbeafe",
-      color="#2563eb"
-    ];
-    c_pause [
-      label="pause()\n_stop_worker()\nkeep buffer\nstate=PAUSED",
-      fillcolor="#dbeafe",
-      color="#2563eb"
-    ];
-    c_stop [
-      label="stop()\n_stop_worker()\nkeep buffer\nstate=STOPPED",
-      fillcolor="#dbeafe",
-      color="#2563eb"
-    ];
-    c_save [
-      label="save()\nsnapshot frames\nwrite CSV\noptional stimulus sidecar",
-      fillcolor="#dcfce7",
-      color="#16a34a"
-    ];
-    c_drain [
-      label="drain_queues()\nlog WorkerEvent\nappend SampleBatch\nstop on error",
-      fillcolor="#fef9c3",
-      color="#ca8a04"
-    ];
-    c_shutdown [
-      label="shutdown()\n_stop_worker()\nstate=STOPPED",
-      fillcolor="#dbeafe",
-      color="#2563eb"
-    ];
-
-    stop_worker [
-      label="_stop_worker()\nset stop_event\njoin worker\nclear refs\ndrain remaining data",
-      fillcolor="#f1f5f9"
-    ];
-    clear_queues [
-      label="_clear_queues()\n_drain_queue()",
-      fillcolor="#f1f5f9"
-    ];
-    drain_data [
-      label="_drain_data_queue()\nappend leftovers to buffer",
-      fillcolor="#f1f5f9"
-    ];
-  }
-
-  subgraph cluster_worker {
-    label="SerialWorker background thread";
-    color="#7c3aed";
-    penwidth=1.6;
-    style="rounded";
-
-    w_init [
-      label="__init__()\nnormalize config\nkeep queues\nset timing origin args",
-      fillcolor="#f3e8ff",
-      color="#7c3aed"
-    ];
-    w_run [
-      label="run()",
-      fillcolor="#f3e8ff",
-      color="#7c3aed"
-    ];
-    w_open [
-      label="serial.Serial(...)\nreset_input_buffer()",
-      fillcolor="#ede9fe",
-      color="#7c3aed"
-    ];
-    w_read [
-      label="read(512)\nloop until stop_event",
-      fillcolor="#ede9fe",
-      color="#7c3aed"
-    ];
-    w_parse [
-      label="ADS1299StreamParser.feed(chunk)",
-      fillcolor="#ede9fe",
-      color="#7c3aed"
-    ];
-    w_time [
-      label="_timestamp_for_counter()\nSAMPLE_RATE_HZ\nresume/regression handling",
-      fillcolor="#ede9fe",
-      color="#7c3aed"
-    ];
-    w_frame [
-      label="SampleFrame\n(time_s, counter,\ndropped, values,\nemg_channel_count)",
-      shape=note,
-      fillcolor="#faf5ff",
-      color="#7c3aed"
-    ];
-    w_batch [
-      label="frames list\nbatch accumulator",
-      shape=folder,
-      fillcolor="#faf5ff",
-      color="#7c3aed"
-    ];
-    w_flush [
-      label="_flush(frames)\nput SampleBatch",
-      fillcolor="#f3e8ff",
-      color="#7c3aed"
-    ];
-    w_close [
-      label="_close_handle()",
-      fillcolor="#f3e8ff",
-      color="#7c3aed"
-    ];
-    w_event [
-      label="WorkerEvent\nlog/error",
-      shape=note,
-      fillcolor="#ffedd5",
-      color="#ea580c"
-    ];
-  }
-
-  subgraph cluster_deps {
-    label="External modules used by acquisition.py";
-    color="#94a3b8";
-    style="rounded,dotted";
-
-    dep_serial [label="pyserial\nserial.Serial", fillcolor="#f8fafc"];
-    dep_ads [label="DeviceInterface.ads1299_protocol\nADS1299StreamParser\nSAMPLE_RATE_HZ", fillcolor="#f8fafc"];
-    dep_messages [label="fundamental.messages\nSerialConfig, SampleFrame,\nSampleBatch, WorkerEvent", fillcolor="#f8fafc"];
-    dep_buffer [label="fundamental.signal_buffer\nSignalBuffer", fillcolor="#f8fafc"];
-    dep_csv [label="fundamental.csv_writer\nsave_frames()\nsave_stimulus_log()\ndefault_capture_path()", fillcolor="#f8fafc"];
-    dep_thread [label="threading\nThread / Event", fillcolor="#f8fafc"];
-    dep_queue [label="queue.Queue", fillcolor="#f8fafc"];
-  }
-
-  legend [
-    label="Legend\nsolid blue: control call\nsolid teal: data path\ndashed orange: status/error path\ndotted gray: module dependency",
-    shape=note,
-    fillcolor="#ffffff",
-    color="#64748b"
-  ];
-
-  ui -> update_config;
-  ui -> start;
-  ui -> pause;
-  ui -> stop;
-  ui -> save;
-  ui -> drain;
-  ui -> shutdown;
-
-  update_config -> ctrl_config [color="#2563eb"];
-  start -> c_start [color="#2563eb"];
-  pause -> c_pause [color="#2563eb"];
-  stop -> c_stop [color="#2563eb"];
-  save -> c_save [color="#2563eb"];
-  drain -> c_drain [color="#2563eb"];
-  shutdown -> c_shutdown [color="#2563eb"];
-
-  c_start -> ctrl_state [color="#2563eb"];
-  c_start -> ctrl_buffer [color="#2563eb"];
-  c_start -> ctrl_save_path [color="#2563eb"];
-  c_start -> clear_queues [color="#2563eb"];
-  c_start -> stop_event [color="#2563eb"];
-  c_start -> worker_ref [color="#2563eb"];
-
-  c_pause -> stop_worker [color="#2563eb"];
-  c_stop -> stop_worker [color="#2563eb"];
-  c_shutdown -> stop_worker [color="#2563eb"];
-  stop_worker -> stop_event [color="#dc2626", label="set"];
-  stop_worker -> drain_data [color="#2563eb"];
-  drain_data -> data_queue [color="#0f766e"];
-  drain_data -> ctrl_buffer [color="#0f766e", label="append"];
-
-  c_drain -> event_queue [color="#ea580c", style=dashed, label="get"];
-  c_drain -> data_queue [color="#0f766e", label="get"];
-  c_drain -> ctrl_buffer [color="#0f766e", label="append_batch"];
-  c_drain -> stop_worker [color="#ea580c", style=dashed, label="on error"];
-
-  c_save -> ctrl_buffer [color="#16a34a", label="snapshot"];
-  c_save -> ctrl_save_path [color="#16a34a", label="update"];
-
-  worker_ref -> w_init [color="#2563eb", label="construct"];
-  w_init -> w_run [color="#2563eb", label="Thread.start()"];
-  w_run -> w_open [color="#2563eb"];
-  w_open -> w_read [color="#2563eb"];
-  w_read -> w_parse [color="#0f766e", label="bytes"];
-  w_parse -> w_time [color="#0f766e", label="ADS1299Frame"];
-  w_time -> w_frame [color="#0f766e"];
-  w_frame -> w_batch [color="#0f766e"];
-  w_batch -> w_flush [color="#0f766e", label="max batch / timeout"];
-  w_flush -> data_queue [color="#0f766e", label="SampleBatch", lhead=cluster_controller];
-  w_run -> w_close [color="#2563eb", label="finally"];
-  w_close -> w_event [color="#ea580c", style=dashed];
-  w_event -> event_queue [color="#ea580c", style=dashed, label="WorkerEvent", lhead=cluster_controller];
-
-  w_read -> w_event [color="#ea580c", style=dashed, label="serial error"];
-  w_parse -> w_event [color="#ea580c", style=dashed, label="resync/drop log"];
-  c_drain -> ui [color="#ea580c", style=dashed, label="log_sink(message)", ltail=cluster_controller];
-
-  w_open -> dep_serial [color="#94a3b8", style=dotted];
-  w_parse -> dep_ads [color="#94a3b8", style=dotted];
-  w_time -> dep_ads [color="#94a3b8", style=dotted];
-  w_frame -> dep_messages [color="#94a3b8", style=dotted];
-  ctrl_buffer -> dep_buffer [color="#94a3b8", style=dotted];
-  c_save -> dep_csv [color="#94a3b8", style=dotted];
-  stop_event -> dep_thread [color="#94a3b8", style=dotted];
-  data_queue -> dep_queue [color="#94a3b8", style=dotted];
-  event_queue -> dep_queue [color="#94a3b8", style=dotted];
+  ads -> schema;
+  w2 -> schema;
+  myo -> schema;
+  ads -> block;
+  w2 -> block;
+  myo -> block;
+  schema -> controller [label="configure"];
+  block -> controller [label="queue"];
+  controller -> store [label="append / resume cursors"];
+  store -> plot [label="SeriesWindow"];
+  store -> future [label="SeriesWindow"];
+  store -> csv [label="StreamSnapshot"];
+  controller -> meta [label="session/device metadata"];
+  csv -> meta [label="files + row counts"];
 }

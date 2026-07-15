@@ -326,7 +326,7 @@ def _refresh_window(acquisition: AcquisitionController, stimulus: StimulusContro
     state = stimulus.state.value.upper()
     dpg.set_value(
         STATUS_TEXT_TAG,
-        f"Stimulus: {state} | Acquisition: {acquisition.state.value.upper()} | Samples: {acquisition.buffer.frame_count}",
+        f"Stimulus: {state} | Acquisition: {acquisition.state.value.upper()} | Rows: {acquisition.buffer.row_count}",
     )
     dpg.set_value(CURRENT_TEXT_TAG, _current_text(stimulus, acquisition.buffer.latest_time_s))
     _sync_save_path(acquisition)
@@ -343,7 +343,7 @@ def _refresh_window(acquisition: AcquisitionController, stimulus: StimulusContro
     _configure_if_exists(RESTART_BUTTON_TAG, enabled=running)
     _configure_if_exists(
         SAVE_BUTTON_TAG,
-        enabled=not acquisition_running and acquisition.buffer.frame_count > 0,
+        enabled=not acquisition_running and acquisition.buffer.row_count > 0,
     )
 
 

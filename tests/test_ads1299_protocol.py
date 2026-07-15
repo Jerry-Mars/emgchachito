@@ -8,20 +8,19 @@ from pathlib import Path
 
 from DeviceInterface.ads1299_protocol import (
     ADS1299StreamParser,
+    CHANNEL_COUNT,
     FRAME_LEN,
     int24_be_to_signed,
     parse_frame,
 )
-from fundamental.csv_writer import save_frames, save_stimulus_log, stimulus_log_path
+from fundamental.capture_store import CaptureStore
+from fundamental.csv_writer import save_capture, save_stimulus_log, stimulus_log_path
 from fundamental.messages import (
-    CHANNEL_COUNT,
     DEFAULT_BAUD_RATE,
-    SampleBatch,
-    SampleFrame,
     SerialConfig,
 )
-from fundamental.signal_buffer import SignalBuffer
-from fundamental.sources.serial_ads1299 import SerialWorker
+from fundamental.sources.serial_ads1299 import ADS1299_STREAM_SPEC, SerialWorker
+from fundamental.streams import CaptureResumeState, StreamBlock, StreamCursor
 from fundamental.stimulus_model import INVALID_STIMULUS_CODE, StimulusController, StimulusEvent, StimulusState
 
 
@@ -128,36 +127,32 @@ class AcquisitionDataContractTests(unittest.TestCase):
         self.assertEqual(DEFAULT_BAUD_RATE, 921600)
 
     def test_buffer_and_csv_keep_counter_and_raw_codes(self) -> None:
-        buffer = SignalBuffer(plot_buffer_size=4)
-        count = buffer.append_batch(
-            SampleBatch(
+        buffer = CaptureStore(plot_buffer_size=4, stream_specs=(ADS1299_STREAM_SPEC,))
+        count = buffer.append_block(
+            StreamBlock(
+                ADS1299_STREAM_SPEC,
+                (0.0, 0.1),
                 (
-                    SampleFrame(0.0, 10, 0, VALUES, emg_channel_count=4),
-                    SampleFrame(0.1, 11, 0, VALUES, emg_channel_count=4),
-                )
+                    (10, 0, 4, *VALUES),
+                    (11, 0, 4, *VALUES),
+                ),
             )
         )
 
         self.assertEqual(count, 2)
-        self.assertEqual(buffer.frame_count, 2)
-        self.assertEqual(buffer.active_channel_count, 4)
-        self.assertEqual(buffer.latest_values[1], -1.0)
-        window = buffer.get_plot_window(1.0)
-        self.assertIsNotNone(window)
-        assert window is not None
-        self.assertEqual(len(window[3]), 4)
-        channel_window = buffer.get_channel_window(1, 1.0)
+        self.assertEqual(buffer.row_count, 2)
+        channel_window = buffer.get_series_window("serial_ads1299.emg/ch2_code", 1.0)
         self.assertIsNotNone(channel_window)
         assert channel_window is not None
-        self.assertEqual(channel_window[0], [0.0, 0.1])
-        self.assertEqual(channel_window[1], [-1.0, -1.0])
-        self.assertIsNone(buffer.get_channel_window(4, 1.0))
+        self.assertEqual(channel_window.time_s, [0.0, 0.1])
+        self.assertEqual(channel_window.values, [-1.0, -1.0])
+        self.assertIsNone(buffer.get_series_window("serial_ads1299.emg/ch5_code", 1.0))
 
         with tempfile.TemporaryDirectory() as tmp:
-            path, rows = save_frames(Path(tmp) / "capture.csv", buffer.snapshot_frames())
-            lines = path.read_text(encoding="utf-8").splitlines()
+            result = save_capture(Path(tmp) / "capture.csv", buffer.snapshots())
+            lines = result.streams[0].path.read_text(encoding="utf-8").splitlines()
 
-        self.assertEqual(rows, 2)
+        self.assertEqual(result.total_rows, 2)
         self.assertEqual(
             lines[0],
             "time_s,frame_counter,dropped_frames_before,"
@@ -170,20 +165,24 @@ class AcquisitionDataContractTests(unittest.TestCase):
         )
 
     def test_labeled_csv_adds_stimulus_code_when_requested(self) -> None:
-        frames = [
-            SampleFrame(0.0, 10, 0, VALUES, emg_channel_count=4),
-            SampleFrame(1.0, 11, 0, VALUES, emg_channel_count=4),
-        ]
+        buffer = CaptureStore(stream_specs=(ADS1299_STREAM_SPEC,))
+        buffer.append_block(
+            StreamBlock(
+                ADS1299_STREAM_SPEC,
+                (0.0, 1.0),
+                ((10, 0, 4, *VALUES), (11, 0, 4, *VALUES)),
+            )
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
-            path, rows = save_frames(
+            result = save_capture(
                 Path(tmp) / "capture.csv",
-                frames,
+                buffer.snapshots(),
                 stimulus_code_for_time=lambda time_s: 1 if time_s < 0.5 else 2,
             )
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = result.streams[0].path.read_text(encoding="utf-8").splitlines()
 
-        self.assertEqual(rows, 2)
+        self.assertEqual(result.total_rows, 2)
         self.assertEqual(
             lines[0],
             "time_s,frame_counter,dropped_frames_before,"
@@ -225,17 +224,40 @@ class AcquisitionDataContractTests(unittest.TestCase):
         self.assertIn("no bytes have arrived", event_queue.get_nowait().message)
 
     def test_resumed_worker_timestamps_continue_after_previous_counter(self) -> None:
+        cursor = StreamCursor(
+            spec=ADS1299_STREAM_SPEC,
+            row_count=1,
+            last_time_s=2.0,
+            last_row=(50, 0, 8, *VALUES),
+        )
         worker = SerialWorker(
             config=SerialConfig(),
             data_queue=queue.Queue(),
             event_queue=queue.Queue(),
             stop_event=threading.Event(),
-            timestamp_offset_s=2.0,
-            expected_counter=51,
+            resume_state=CaptureResumeState(2.0, {ADS1299_STREAM_SPEC.stream_id: cursor}),
         )
 
         self.assertEqual(worker._timestamp_for_counter(51), 2.001)
         self.assertEqual(worker._timestamp_for_counter(54), 2.004)
+
+    def test_resume_counter_gap_does_not_insert_paused_wall_time(self) -> None:
+        cursor = StreamCursor(
+            spec=ADS1299_STREAM_SPEC,
+            row_count=1,
+            last_time_s=2.0,
+            last_row=(50, 0, 8, *VALUES),
+        )
+        worker = SerialWorker(
+            config=SerialConfig(),
+            data_queue=queue.Queue(),
+            event_queue=queue.Queue(),
+            stop_event=threading.Event(),
+            resume_state=CaptureResumeState(2.0, {ADS1299_STREAM_SPEC.stream_id: cursor}),
+        )
+
+        self.assertEqual(worker._timestamp_for_counter(80), 2.001)
+        self.assertEqual(worker._timestamp_for_counter(81), 2.002)
 
 
 class StimulusContractTests(unittest.TestCase):

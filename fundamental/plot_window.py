@@ -9,17 +9,16 @@ from dataclasses import dataclass
 import dearpygui.dearpygui as dpg
 
 from fundamental.app_shell import FundamentalApp
+from fundamental.capture_store import CaptureStore
 from fundamental.commands import CommandSpec
-from fundamental.messages import CHANNEL_COUNT, DEFAULT_PLOT_WINDOW_SECONDS
+from fundamental.messages import DEFAULT_PLOT_WINDOW_SECONDS
 from fundamental.plot_processing import (
     SCALE_MODE_OPTIONS,
-    SIGNAL_VIEW_OPTIONS,
     AxisScaler,
     minmax_downsample,
     process_signal,
     signal_stats,
 )
-from fundamental.signal_buffer import SignalBuffer
 from fundamental.window_manager import ManagedWindow
 
 
@@ -61,7 +60,7 @@ CHANNEL_COLORS = [
 @dataclass
 class PlotSlot:
     slot_id: int
-    channel_index: int
+    series_id: str
     signal_view: str
     scale_mode: str
 
@@ -83,6 +82,7 @@ class PlotSlot:
 
     def build(
         self,
+        provider: CaptureStore,
         parent: int | str,
         display_index: int,
         show_x_labels: bool,
@@ -96,7 +96,7 @@ class PlotSlot:
             with dpg.group(horizontal=True):
                 dpg.add_text(f"Plot {display_index + 1}", tag=self.title_tag, bullet=True)
                 dpg.add_spacer(width=8)
-                dpg.add_text(_slot_summary(self), tag=self.summary_tag, color=MUTED_TEXT_COLOR)
+                dpg.add_text(_slot_summary(provider, self), tag=self.summary_tag, color=MUTED_TEXT_COLOR)
                 if can_remove:
                     dpg.add_spacer(width=8)
                     dpg.add_button(
@@ -109,17 +109,17 @@ class PlotSlot:
 
             if controls_visible:
                 with dpg.group(horizontal=True):
-                    dpg.add_text("Channel")
+                    dpg.add_text("Series")
                     dpg.add_combo(
-                        _channel_labels(),
-                        default_value=_channel_label(self.channel_index),
-                        width=90,
+                        _series_labels(provider),
+                        default_value=_series_label(provider, self.series_id),
+                        width=150,
                         tag=self.channel_tag,
                         callback=self._on_channel_changed,
                     )
                     dpg.add_text("View")
                     dpg.add_combo(
-                        list(SIGNAL_VIEW_OPTIONS),
+                        list(self._view_options(provider)),
                         default_value=self.signal_view,
                         width=120,
                         tag=self.view_tag,
@@ -141,7 +141,12 @@ class PlotSlot:
                     tag=self.x_axis_tag,
                     no_tick_labels=not show_x_labels,
                 )
-                dpg.add_plot_axis(dpg.mvYAxis, label="code", tag=self.y_axis_tag)
+                series_spec = provider.series_spec(self.series_id)
+                dpg.add_plot_axis(
+                    dpg.mvYAxis,
+                    label=(series_spec.unit if series_spec is not None else "value"),
+                    tag=self.y_axis_tag,
+                )
                 dpg.add_line_series([], [], parent=self.y_axis_tag, tag=self.series_tag)
                 dpg.bind_item_theme(
                     self.series_tag,
@@ -149,25 +154,35 @@ class PlotSlot:
                 )
 
         dpg.bind_item_theme(self.card_tag, PLOT_SLOT_THEME_TAG)
+        self._provider = provider
 
-    def update(self, buffer: SignalBuffer, window_seconds: float) -> None:
-        channel_data = buffer.get_channel_window(self.channel_index, window_seconds)
-        if channel_data is None:
+    def update(self, provider: CaptureStore, window_seconds: float) -> None:
+        series_window = provider.get_series_window(self.series_id, window_seconds)
+        if series_window is None:
             dpg.set_value(self.series_tag, [[], []])
-            dpg.set_value(self.status_tag, _empty_status(buffer, self.channel_index))
+            dpg.set_value(self.status_tag, _empty_status(provider, self.series_id))
             dpg.set_axis_limits(self.x_axis_tag, -float(window_seconds), 0.0)
             dpg.set_axis_limits(self.y_axis_tag, -1.0, 1.0)
             return
 
-        timestamps, raw_values = channel_data
-        processed = process_signal(raw_values, self.signal_view)
+        timestamps = series_window.time_s
+        processed = process_signal(
+            series_window.values,
+            self.signal_view,
+            series_window.spec.unit or "value",
+        )
         relative_time = [timestamp - timestamps[-1] for timestamp in timestamps]
         display_x, display_y = minmax_downsample(relative_time, processed.values, MAX_DISPLAY_POINTS)
 
         dpg.set_value(self.series_tag, [display_x, display_y])
         dpg.set_axis_limits(self.x_axis_tag, -float(window_seconds), 0.0)
 
-        low, high, outside = self.scaler.get_limits(processed.values, self.scale_mode, processed.bipolar)
+        low, high, outside = self.scaler.get_limits(
+            processed.values,
+            self.scale_mode,
+            processed.bipolar,
+            fixed_range=series_window.spec.fixed_range,
+        )
         dpg.set_axis_limits(self.y_axis_tag, low, high)
         dpg.set_item_label(self.y_axis_tag, processed.unit)
 
@@ -177,33 +192,48 @@ class PlotSlot:
             status = f"{status} | Axis Out {outside}"
         dpg.set_value(self.status_tag, status)
 
-    def set_channel_index(self, channel_index: int) -> None:
-        self.channel_index = max(0, min(CHANNEL_COUNT - 1, int(channel_index)))
+    def set_series_id(self, provider: CaptureStore, series_id: str) -> None:
+        if provider.series_spec(series_id) is None:
+            return
+        self.series_id = series_id
+        options = self._view_options(provider)
+        if self.signal_view not in options:
+            self.signal_view = options[0]
         self.scaler.reset()
-        _set_value_if_exists(self.channel_tag, _channel_label(self.channel_index))
-        self._refresh_summary()
+        _configure_if_exists(self.view_tag, items=list(options))
+        _set_value_if_exists(self.channel_tag, _series_label(provider, self.series_id))
+        _set_value_if_exists(self.view_tag, self.signal_view)
+        self._refresh_summary(provider)
 
     def set_signal_view(self, signal_view: str) -> None:
+        provider = getattr(self, "_provider", None)
+        if provider is not None and signal_view not in self._view_options(provider):
+            return
         self.signal_view = signal_view
         self.scaler.reset()
         _set_value_if_exists(self.view_tag, signal_view)
-        self._refresh_summary()
+        if provider is not None:
+            self._refresh_summary(provider)
 
     def set_scale_mode(self, scale_mode: str) -> None:
         self.scale_mode = scale_mode
         self.scaler.reset()
         _set_value_if_exists(self.scale_tag, scale_mode)
-        self._refresh_summary()
+        provider = getattr(self, "_provider", None)
+        if provider is not None:
+            self._refresh_summary(provider)
 
     def resize(self, slot_height: int, plot_height: int) -> None:
         _configure_if_exists(self.card_tag, height=slot_height)
         _configure_if_exists(self.plot_tag, height=plot_height)
 
-    def _refresh_summary(self) -> None:
-        _set_value_if_exists(self.summary_tag, _slot_summary(self))
+    def _refresh_summary(self, provider: CaptureStore) -> None:
+        _set_value_if_exists(self.summary_tag, _slot_summary(provider, self))
 
     def _on_channel_changed(self, _sender, app_data, _user_data=None) -> None:
-        self.set_channel_index(_channel_index_from_label(str(app_data)))
+        provider = getattr(self, "_provider", None)
+        if provider is not None:
+            self.set_series_id(provider, _series_id_from_label(provider, str(app_data)))
 
     def _on_view_changed(self, _sender, app_data, _user_data=None) -> None:
         self.set_signal_view(str(app_data))
@@ -211,24 +241,34 @@ class PlotSlot:
     def _on_scale_changed(self, _sender, app_data, _user_data=None) -> None:
         self.set_scale_mode(str(app_data))
 
+    def _view_options(self, provider: CaptureStore) -> tuple[str, ...]:
+        series = provider.series_spec(self.series_id)
+        return series.view_options if series is not None else ("Raw",)
+
 
 class PlotWindowState:
-    def __init__(self) -> None:
+    def __init__(self, provider: CaptureStore) -> None:
         self.slots: list[PlotSlot] = []
         self.next_slot_id = 0
         self.last_refresh_time = 0.0
-        self.reset_defaults()
+        self.catalog_signature: tuple[str, ...] = ()
+        self.reset_defaults(provider)
 
-    def add_slot(self) -> PlotSlot | None:
+    def add_slot(self, provider: CaptureStore) -> PlotSlot | None:
         if len(self.slots) >= MAX_SLOT_COUNT:
             return None
 
+        series_specs = provider.series_specs()
+        if not series_specs:
+            return None
         position = len(self.slots)
-        channel_index = position % CHANNEL_COUNT
+        series = series_specs[position % len(series_specs)]
         signal_view = DEFAULT_SIGNAL_VIEWS[position] if position < len(DEFAULT_SIGNAL_VIEWS) else "Raw"
+        if signal_view not in series.view_options:
+            signal_view = series.view_options[0]
         slot = PlotSlot(
             slot_id=self.next_slot_id,
-            channel_index=channel_index,
+            series_id=series.series_id,
             signal_view=signal_view,
             scale_mode="Robust Scaling",
         )
@@ -251,15 +291,36 @@ class PlotWindowState:
         self.slots.pop()
         return True
 
-    def reset_defaults(self) -> None:
+    def reset_defaults(self, provider: CaptureStore) -> None:
         self.slots = []
         self.next_slot_id = 0
-        for _index in range(CHANNEL_COUNT):
-            self.add_slot()
+        series_specs = provider.series_specs()
+        defaults = [series for series in series_specs if series.default_plot]
+        selected = defaults or list(series_specs[:8])
+        for position, series in enumerate(selected[:MAX_SLOT_COUNT]):
+            signal_view = DEFAULT_SIGNAL_VIEWS[position] if position < len(DEFAULT_SIGNAL_VIEWS) else "Raw"
+            if signal_view not in series.view_options:
+                signal_view = series.view_options[0]
+            self.slots.append(
+                PlotSlot(self.next_slot_id, series.series_id, signal_view, "Robust Scaling")
+            )
+            self.next_slot_id += 1
+        self.catalog_signature = tuple(series.series_id for series in series_specs)
         self.last_refresh_time = 0.0
 
-    def refresh(self, buffer: SignalBuffer, force: bool = False) -> None:
+    def sync_catalog(self, provider: CaptureStore) -> bool:
+        signature = tuple(series.series_id for series in provider.series_specs())
+        if signature == self.catalog_signature:
+            return False
+        self.reset_defaults(provider)
+        return True
+
+    def refresh(self, provider: CaptureStore, force: bool = False) -> None:
         if not dpg.does_item_exist(PLOT_WINDOW_TAG):
+            return
+
+        if self.sync_catalog(provider):
+            _rebuild_slot_list(self, provider)
             return
 
         now = time.monotonic()
@@ -267,14 +328,14 @@ class PlotWindowState:
             return
 
         window_seconds = float(dpg.get_value(WINDOW_SECONDS_TAG))
-        _refresh_status(buffer)
+        _refresh_status(provider)
         for slot in self.slots:
-            slot.update(buffer, window_seconds)
+            slot.update(provider, window_seconds)
         self.last_refresh_time = now
 
 
-def register(app: FundamentalApp, buffer: SignalBuffer) -> None:
-    state = PlotWindowState()
+def register(app: FundamentalApp, buffer: CaptureStore) -> None:
+    state = PlotWindowState(buffer)
     app.window_manager.register(
         ManagedWindow(
             tag=PLOT_WINDOW_TAG,
@@ -292,13 +353,13 @@ def register(app: FundamentalApp, buffer: SignalBuffer) -> None:
     app.register_frame_callback(lambda frame_app: _on_frame(frame_app, buffer, state))
 
 
-def _open_window(app: FundamentalApp, buffer: SignalBuffer, state: PlotWindowState) -> str | None:
+def _open_window(app: FundamentalApp, buffer: CaptureStore, state: PlotWindowState) -> str | None:
     app.open_window(PLOT_WINDOW_TAG)
     state.refresh(buffer, force=True)
     return None
 
 
-def _build_window(_app: FundamentalApp, buffer: SignalBuffer, state: PlotWindowState) -> None:
+def _build_window(_app: FundamentalApp, buffer: CaptureStore, state: PlotWindowState) -> None:
     _ensure_plot_themes()
 
     with dpg.window(
@@ -389,28 +450,25 @@ def _build_window(_app: FundamentalApp, buffer: SignalBuffer, state: PlotWindowS
     _rebuild_slot_list(state, buffer)
 
 
-def _on_frame(_app: FundamentalApp, buffer: SignalBuffer, state: PlotWindowState) -> None:
+def _on_frame(_app: FundamentalApp, buffer: CaptureStore, state: PlotWindowState) -> None:
     state.refresh(buffer)
 
 
-def _refresh_status(buffer: SignalBuffer) -> None:
+def _refresh_status(buffer: CaptureStore) -> None:
     if not dpg.does_item_exist(STATUS_TEXT_TAG):
         return
 
-    active_channel_count = buffer.active_channel_count
-    latest_values = buffer.latest_values[:active_channel_count]
-    latest = "  ".join(
-        f"CH{index + 1}: {value:.1f}" for index, value in enumerate(latest_values[:4])
-    )
-    if active_channel_count > 4:
-        latest = f"{latest}  ..."
+    latest_values = buffer.latest_series_values(limit=4)
+    latest = "  ".join(f"{series.label}: {value:.3f}" for series, value in latest_values)
+    series_count = len(buffer.series_specs())
     dpg.set_value(
         STATUS_TEXT_TAG,
-        f"Samples {buffer.frame_count} | Channels {active_channel_count or '-'} | Latest {latest or '-'}",
+        f"Rows {buffer.row_count} | Streams {buffer.stream_count or '-'} | "
+        f"Series {series_count or '-'} | Latest {latest or '-'}",
     )
 
 
-def _rebuild_slot_list(state: PlotWindowState, buffer: SignalBuffer) -> None:
+def _rebuild_slot_list(state: PlotWindowState, buffer: CaptureStore) -> None:
     if not dpg.does_item_exist(SLOTS_PARENT_TAG):
         return
 
@@ -420,6 +478,7 @@ def _rebuild_slot_list(state: PlotWindowState, buffer: SignalBuffer) -> None:
 
     for index, slot in enumerate(state.slots):
         slot.build(
+            provider=buffer,
             parent=SLOTS_PARENT_TAG,
             display_index=index,
             show_x_labels=index == len(state.slots) - 1,
@@ -435,21 +494,21 @@ def _rebuild_slot_list(state: PlotWindowState, buffer: SignalBuffer) -> None:
     state.refresh(buffer, force=True)
 
 
-def _add_slot(state: PlotWindowState, buffer: SignalBuffer) -> None:
-    if state.add_slot() is None:
+def _add_slot(state: PlotWindowState, buffer: CaptureStore) -> None:
+    if state.add_slot(buffer) is None:
         _update_plot_count(state, "Maximum reached")
         return
     _rebuild_slot_list(state, buffer)
 
 
-def _remove_slot(state: PlotWindowState, buffer: SignalBuffer, slot_id: int) -> None:
+def _remove_slot(state: PlotWindowState, buffer: CaptureStore, slot_id: int) -> None:
     if not state.remove_slot(slot_id):
         _update_plot_count(state, "Keep at least one")
         return
     _rebuild_slot_list(state, buffer)
 
 
-def _remove_last_slot(state: PlotWindowState, buffer: SignalBuffer) -> None:
+def _remove_last_slot(state: PlotWindowState, buffer: CaptureStore) -> None:
     if not state.remove_last_slot():
         _update_plot_count(state, "Keep at least one")
         return
@@ -479,24 +538,26 @@ def _set_all_view(state: PlotWindowState, signal_view: str) -> None:
         slot.set_signal_view(signal_view)
 
 
-def _restore_defaults(state: PlotWindowState, buffer: SignalBuffer) -> None:
-    state.reset_defaults()
+def _restore_defaults(state: PlotWindowState, buffer: CaptureStore) -> None:
+    state.reset_defaults(buffer)
     _set_value_if_exists(WINDOW_SECONDS_TAG, DEFAULT_PLOT_WINDOW_SECONDS)
     _set_value_if_exists(DENSITY_TAG, "Comfortable")
     _set_value_if_exists(SLOT_CONTROLS_VISIBLE_TAG, True)
     _rebuild_slot_list(state, buffer)
 
 
-def _empty_status(buffer: SignalBuffer, channel_index: int) -> str:
-    if buffer.frame_count == 0:
+def _empty_status(buffer: CaptureStore, series_id: str) -> str:
+    if buffer.row_count == 0:
         return "Waiting for data"
-    if channel_index >= buffer.active_channel_count:
-        return "Channel inactive"
+    if buffer.series_spec(series_id) is None:
+        return "Series unavailable"
+    if buffer.get_series_window(series_id, DEFAULT_PLOT_WINDOW_SECONDS) is None:
+        return "Series inactive"
     return "Waiting for window"
 
 
-def _slot_summary(slot: PlotSlot) -> str:
-    return f"{_channel_label(slot.channel_index)} | {slot.signal_view} | {slot.scale_mode}"
+def _slot_summary(provider: CaptureStore, slot: PlotSlot) -> str:
+    return f"{_series_label(provider, slot.series_id)} | {slot.signal_view} | {slot.scale_mode}"
 
 
 def _slot_controls_visible() -> bool:
@@ -517,19 +578,35 @@ def _slot_dimensions(density: str, controls_visible: bool) -> tuple[int, int]:
     return slot_height, max(110, slot_height - reserved_height)
 
 
-def _channel_labels() -> list[str]:
-    return [_channel_label(index) for index in range(CHANNEL_COUNT)]
+def _series_label_map(provider: CaptureStore) -> dict[str, str]:
+    specs = provider.series_specs()
+    label_counts: dict[str, int] = {}
+    for spec in specs:
+        label_counts[spec.label] = label_counts.get(spec.label, 0) + 1
+    return {
+        spec.series_id: (
+            spec.label
+            if label_counts[spec.label] == 1
+            else f"{spec.label} · {spec.stream_id}"
+        )
+        for spec in specs
+    }
 
 
-def _channel_label(channel_index: int) -> str:
-    return f"CH {channel_index + 1}"
+def _series_labels(provider: CaptureStore) -> list[str]:
+    return list(_series_label_map(provider).values())
 
 
-def _channel_index_from_label(label: str) -> int:
-    try:
-        return max(0, min(CHANNEL_COUNT - 1, int(label.split()[-1]) - 1))
-    except (IndexError, ValueError):
-        return 0
+def _series_label(provider: CaptureStore, series_id: str) -> str:
+    return _series_label_map(provider).get(series_id, series_id)
+
+
+def _series_id_from_label(provider: CaptureStore, label: str) -> str:
+    labels = _series_label_map(provider)
+    return next(
+        (series_id for series_id, display_label in labels.items() if display_label == label),
+        next(iter(labels), ""),
+    )
 
 
 def _configure_if_exists(tag: str, **kwargs) -> None:

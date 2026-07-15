@@ -54,10 +54,12 @@ Stimulus controls use the same recording session:
 - `Restart Event`: mark the current event attempt as invalid and restart it.
 - `Save`: save EMG samples with `stimulus_code` plus a `.stimulus.csv` sidecar log.
 
-The plot window is display-only. It reads the acquisition buffer, lets the user
-add or delete plot slots, and offers per-slot channel, signal view, and scale
-controls without owning acquisition start, pause, stop, or save behavior. Slot
-controls can be hidden to give each plot more vertical space.
+The plot window is display-only. It reads plottable scalar series declared by
+the active source schema, lets the user add or delete plot slots, and offers
+per-slot series, compatible signal view, and scale controls. It does not know
+about ADS1299, W2, or Myo packet shapes, and it does not own acquisition start,
+pause, stop, or save behavior. The existing plot-card layout and optional hidden
+controls are preserved.
 
 ## Extension Contract
 
@@ -82,7 +84,7 @@ only lifecycle, command routing, window routing, and logs.
 
 The current shared services are:
 
-- `acquisition`: acquisition controller, selected source, and frame buffer owner.
+- `acquisition`: acquisition controller, selected source, and capture store owner.
 - `stimulus`: sample-time stimulus schedule and annotation model.
 - `recording_session`: shared `start/pause/resume/stop/save` coordination across
   acquisition and optional stimulus labels.
@@ -96,14 +98,77 @@ unless acquisition is stopped. Current sources:
   `DeviceInterface/ads1299_protocol.py` (accepts both the current 35-byte frame
   and the legacy 34-byte frame).
 - `ble_w2`: BLE W2 worker using `DeviceInterface/w2_protocol.py`.
+- `ble_myo`: Myo armband worker using `pymyo` over `bleak`; it can acquire raw
+  8-channel EMG, IMU, or both.
 
-BLE defaults to scanning for an advertised name containing `RunE W2`. Enter an
-address only when intentionally pinning acquisition to one known unit; the
-address in `device_host_demo/main.py` is specific to that demo device.
+W2 defaults to scanning for an advertised name containing `RunE W2`. Myo
+defaults to the Myo control-service UUID and an advertised name containing
+`Myo`. Enter an address only when intentionally pinning acquisition to one
+known unit; demo addresses are device-specific.
 
 The `source` command opens the shared source window. Its data inspection block
-shows the selected source's worker handle, transport handle, parser, and current
-`SampleFrame` output shape.
+shows the selected source's worker, transport/parser, and declared stream
+schemas.
+
+## Heterogeneous Stream Contract
+
+All production sources publish the same small contract:
+
+- `StreamSpec` declares a stream ID, nominal rate, time source, and ordered
+  `FieldSpec` columns.
+- `StreamBlock` carries a validated batch from exactly one independently sampled
+  stream.
+- `CaptureStore` retains full rows for saving and bounded per-series windows for
+  live consumers.
+
+ADS1299, W2, and Myo source modules own their protocol-specific parsing. Plotting
+and CSV persistence consume only the schema and store interfaces. A future
+sensor can therefore add fields or streams without adding device branches to
+the plot or writer. A future 3D IMU view can query quaternion/IMU series from the
+same store without depending on BLE code.
+
+## Myo Timing and Files
+
+Myo EMG and IMU belong to one device connection and one capture session, but
+they are not delivered as one simultaneous row: pymyo receives independent BLE
+notifications at different native rates (approximately 200 EMG samples/s and
+50 IMU samples/s). The raw acquisition therefore keeps two lossless tables
+instead of silently repeating IMU values, dropping EMG rows, or inventing an
+interpolation policy:
+
+```text
+capture.myo_emg.csv
+capture.myo_imu.csv
+capture.metadata.json
+```
+
+The JSON sidecar ties both files to the same capture and records source config,
+device information, schemas, nominal rates, row counts, and timestamp meaning.
+If only EMG or only IMU is enabled, the single stream uses the requested CSV
+path directly. A synchronized/fused table should be an explicit downstream
+transformation whose resampling policy is chosen for the analysis, not a change
+to the raw evidence.
+
+Myo does not provide a sample timestamp. Its columns therefore mean:
+
+- `time_s`: capture-relative time reconstructed independently for each stream
+  from its nominal rate; suitable for the common plot/capture timeline.
+- `host_rx_time_s`: capture-relative host callback time; useful for auditing BLE
+  notification jitter or gaps. The two EMG samples in one notification share
+  this value.
+
+No artificial `sample_index`, `Cnt`, or duplicate wall-clock columns are stored:
+CSV row order already supplies a lossless index. Device-native counters are kept
+when they actually exist (ADS1299 `frame_counter`). Pause/resume uses an active
+capture timeline, so time continues from the last stored sample rather than
+including the wall-clock pause.
+
+## Schema-driven CSV
+
+CSV headers come directly from each `StreamSpec`: metadata fields first,
+optional `stimulus_code`, then signal fields. The writer has no device-specific
+header branches. One populated stream produces one CSV; multiple independent
+streams produce one raw CSV per stream plus one shared metadata sidecar.
 
 ## Serial Protocol
 

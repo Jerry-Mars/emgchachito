@@ -53,15 +53,15 @@ def moving_rms(values: list[float], window: int = 50) -> list[float]:
     return [math.sqrt(value) for value in moving_average([value * value for value in values], window)]
 
 
-def process_signal(values: list[float], signal_view: str) -> ProcessedSignal:
+def process_signal(values: list[float], signal_view: str, unit: str = "code") -> ProcessedSignal:
     raw = [float(value) for value in values]
     if signal_view == "Rectified":
-        return ProcessedSignal([abs(value) for value in raw], False, "abs(code)")
+        return ProcessedSignal([abs(value) for value in raw], False, f"abs({unit})")
     if signal_view == "RMS":
-        return ProcessedSignal(moving_rms(raw, 50), False, "code RMS")
+        return ProcessedSignal(moving_rms(raw, 50), False, f"{unit} RMS")
     if signal_view == "Envelope":
-        return ProcessedSignal(moving_average([abs(value) for value in raw], 100), False, "code")
-    return ProcessedSignal(raw, True, "code")
+        return ProcessedSignal(moving_average([abs(value) for value in raw], 100), False, unit)
+    return ProcessedSignal(raw, True, unit)
 
 
 def minmax_downsample(
@@ -109,17 +109,26 @@ class AxisScaler:
     def reset(self) -> None:
         self.current = None
 
-    def get_limits(self, values: list[float], scale_mode: str, bipolar: bool) -> tuple[float, float, int]:
+    def get_limits(
+        self,
+        values: list[float],
+        scale_mode: str,
+        bipolar: bool,
+        fixed_range: tuple[float, float] | None = None,
+    ) -> tuple[float, float, int]:
         finite = [value for value in values if math.isfinite(value)]
         if not finite:
             return -1.0, 1.0, 0
 
         if scale_mode == "Fixed Range":
-            low, high = (
-                (-FIXED_BIPOLAR_LIMIT, FIXED_BIPOLAR_LIMIT)
-                if bipolar
-                else (0.0, FIXED_UNIPOLAR_LIMIT)
-            )
+            if fixed_range is not None:
+                low, high = fixed_range
+            else:
+                low, high = (
+                    (-FIXED_BIPOLAR_LIMIT, FIXED_BIPOLAR_LIMIT)
+                    if bipolar
+                    else (0.0, FIXED_UNIPOLAR_LIMIT)
+                )
             outside = _outside_count(finite, low, high)
             self.current = (low, high)
             return low, high, outside
