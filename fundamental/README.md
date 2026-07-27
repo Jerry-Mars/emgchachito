@@ -97,14 +97,19 @@ unless acquisition is stopped. Current sources:
 - `serial_ads1299`: serial ADS1299 worker using
   `DeviceInterface/ads1299_protocol.py` (accepts both the current 35-byte frame
   and the legacy 34-byte frame).
-- `ble_w2`: BLE W2 worker using `DeviceInterface/w2_protocol.py`.
+- `ble_w2`: W2 source using `DeviceInterface/w2_protocol.py`; it can connect
+  over BLE or acquire one or more W2 units through independent serial ports.
 - `ble_myo`: Myo armband worker using `pymyo` over `bleak`; it can acquire raw
   8-channel EMG, IMU, or both.
 
-W2 defaults to scanning for an advertised name containing `RunE W2`. Myo
-defaults to the Myo control-service UUID and an advertised name containing
-`Myo`. Enter an address only when intentionally pinning acquisition to one
-known unit; demo addresses are device-specific.
+W2 defaults to scanning for an advertised name containing `RunE W2`. Selecting
+the W2 serial transport exposes a channel list; each channel has its own unique
+ID and Port and defaults to `25600 8N1` with a `0.05 s` timeout. All configured
+W2 serial channels start, pause, stop, and save as one acquisition source while
+publishing independent streams. Myo defaults to the Myo control-service UUID
+and an advertised name containing `Myo`. Enter an address only when
+intentionally pinning acquisition to one known unit; demo addresses are
+device-specific.
 
 The `source` command opens the shared source window. Its data inspection block
 shows the selected source's worker, transport/parser, and declared stream

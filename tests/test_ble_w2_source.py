@@ -12,8 +12,12 @@ import fundamental.sources.ble_w2 as ble_w2_module
 from fundamental.sources.ble_w2 import (
     BLEW2Source,
     BLEW2Worker,
+    DEFAULT_W2_SERIAL_BAUD_RATE,
+    SerialW2Worker,
     W2BLEConfig,
+    W2SerialDeviceConfig,
     W2StreamAdapter,
+    W2WorkerGroup,
     w2_stream_spec,
 )
 
@@ -138,6 +142,45 @@ class BLEW2SourceTests(unittest.TestCase):
         self.assertIsInstance(worker, BLEW2Worker)
         self.assertEqual(worker.config.address, "AA:BB")
         self.assertEqual(worker.config.mode, "emg_rms")
+
+    def test_serial_source_builds_one_unique_stream_and_worker_per_port(self) -> None:
+        config = W2BLEConfig(
+            transport="serial",
+            serial_devices=(
+                W2SerialDeviceConfig(channel_id="left", port="COM7"),
+                W2SerialDeviceConfig(channel_id="right", port="COM8"),
+            ),
+        )
+        source = BLEW2Source(config=config)
+
+        specs = source.stream_specs()
+        worker = source.create_worker(
+            data_queue=queue.Queue(),
+            event_queue=queue.Queue(),
+            stop_event=threading.Event(),
+        )
+
+        self.assertEqual(
+            tuple(spec.stream_id for spec in specs),
+            ("ble_w2.serial.left.signal", "ble_w2.serial.right.signal"),
+        )
+        self.assertEqual(tuple(spec.fields[0].label for spec in specs), ("left EMG Raw", "right EMG Raw"))
+        self.assertIsInstance(worker, W2WorkerGroup)
+        assert isinstance(worker, W2WorkerGroup)
+        self.assertEqual(len(worker.workers), 2)
+        self.assertTrue(all(isinstance(child, SerialW2Worker) for child in worker.workers))
+        self.assertEqual(source.capture_metadata()["transport"], "serial")
+
+
+class W2SerialConfigTests(unittest.TestCase):
+    def test_w2_serial_default_baud_is_25600_without_changing_other_defaults(self) -> None:
+        device = W2SerialDeviceConfig()
+        config = W2BLEConfig()
+
+        self.assertEqual(DEFAULT_W2_SERIAL_BAUD_RATE, 25600)
+        self.assertEqual(config.serial_baud_rate, 25600)
+        self.assertEqual(device.port, "COM5")
+        self.assertEqual(config.serial_timeout_s, 0.05)
 
 
 class FailingStopClient:
@@ -281,6 +324,180 @@ class BLEW2WorkerTests(unittest.TestCase):
 
         self.assertEqual(client.write_count, 0)
         self.assertEqual(client.stop_notify_count, 1)
+
+
+class SerialW2WorkerTests(unittest.TestCase):
+    def test_serial_worker_uses_8n1_25600_and_the_existing_parser_and_commands(self) -> None:
+        stop_event = threading.Event()
+        frame = make_w2_raw_frame(W2CommandBuilder.MODE_EMG_RAW, 10.0, (3,))
+
+        class FakeSerialException(Exception):
+            pass
+
+        class FakeSerialHandle:
+            def __init__(self) -> None:
+                self.reads = [frame]
+                self.writes: list[bytes] = []
+                self.input_reset = False
+                self.closed = False
+
+            def reset_input_buffer(self) -> None:
+                self.input_reset = True
+
+            def write(self, data: bytes) -> int:
+                self.writes.append(bytes(data))
+                return len(data)
+
+            def flush(self) -> None:
+                return None
+
+            def read(self, _size: int) -> bytes:
+                if self.reads:
+                    return self.reads.pop(0)
+                stop_event.set()
+                return b""
+
+            def close(self) -> None:
+                self.closed = True
+
+        handle = FakeSerialHandle()
+        opened: dict[str, object] = {}
+
+        def open_serial(port: str, baud_rate: int, **kwargs):
+            opened.update(port=port, baud_rate=baud_rate, **kwargs)
+            return handle
+
+        fake_serial_module = SimpleNamespace(
+            Serial=open_serial,
+            SerialException=FakeSerialException,
+            EIGHTBITS=8,
+            PARITY_NONE="N",
+            STOPBITS_ONE=1,
+        )
+        config = W2BLEConfig(
+            transport="serial",
+            serial_devices=(W2SerialDeviceConfig(channel_id="ch1", port="COM7"),),
+        )
+        spec = BLEW2Source(config).stream_specs()[0]
+        data_queue: queue.Queue = queue.Queue()
+        worker = SerialW2Worker(
+            config=config,
+            serial_config=config.serial_devices[0],
+            spec=spec,
+            data_queue=data_queue,
+            event_queue=queue.Queue(),
+            stop_event=stop_event,
+        )
+
+        old_serial = ble_w2_module.serial
+        ble_w2_module.serial = fake_serial_module  # type: ignore[assignment]
+        try:
+            worker.run()
+        finally:
+            ble_w2_module.serial = old_serial
+
+        self.assertEqual(opened["port"], "COM7")
+        self.assertEqual(opened["baud_rate"], 25600)
+        self.assertEqual(opened["bytesize"], 8)
+        self.assertEqual(opened["parity"], "N")
+        self.assertEqual(opened["stopbits"], 1)
+        self.assertEqual(opened["timeout"], 0.05)
+        self.assertTrue(handle.input_reset)
+        self.assertEqual(
+            handle.writes,
+            [W2CommandBuilder.start_emg_raw(), W2CommandBuilder.stop_collect()],
+        )
+        self.assertTrue(handle.closed)
+        block = data_queue.get_nowait()
+        self.assertEqual(block.spec.stream_id, "ble_w2.serial.ch1.signal")
+        self.assertEqual(len(block.rows), 2)
+        self.assertAlmostEqual(block.rows[0][0], 10.0)
+        self.assertAlmostEqual(block.rows[1][0], 10.0 + 3 / 3.1457)
+
+    def test_worker_group_starts_and_stops_every_serial_port_as_one_source(self) -> None:
+        stop_event = threading.Event()
+        all_opened = threading.Event()
+        opened_lock = threading.Lock()
+        handles: dict[str, object] = {}
+
+        class FakeSerialException(Exception):
+            pass
+
+        class WaitingSerialHandle:
+            def __init__(self, port: str) -> None:
+                self.port = port
+                self.writes: list[bytes] = []
+                self.closed = False
+
+            def reset_input_buffer(self) -> None:
+                return None
+
+            def write(self, data: bytes) -> int:
+                self.writes.append(bytes(data))
+                return len(data)
+
+            def flush(self) -> None:
+                return None
+
+            def read(self, _size: int) -> bytes:
+                stop_event.wait(0.01)
+                return b""
+
+            def close(self) -> None:
+                self.closed = True
+
+        def open_serial(port: str, _baud_rate: int, **_kwargs):
+            handle = WaitingSerialHandle(port)
+            with opened_lock:
+                handles[port] = handle
+                if len(handles) == 2:
+                    all_opened.set()
+            return handle
+
+        fake_serial_module = SimpleNamespace(
+            Serial=open_serial,
+            SerialException=FakeSerialException,
+            EIGHTBITS=8,
+            PARITY_NONE="N",
+            STOPBITS_ONE=1,
+        )
+        source = BLEW2Source(
+            W2BLEConfig(
+                transport="serial",
+                serial_devices=(
+                    W2SerialDeviceConfig(channel_id="left", port="COM7"),
+                    W2SerialDeviceConfig(channel_id="right", port="COM8"),
+                ),
+            )
+        )
+        group = source.create_worker(
+            data_queue=queue.Queue(),
+            event_queue=queue.Queue(),
+            stop_event=stop_event,
+        )
+        self.assertIsInstance(group, W2WorkerGroup)
+        assert isinstance(group, W2WorkerGroup)
+
+        old_serial = ble_w2_module.serial
+        ble_w2_module.serial = fake_serial_module  # type: ignore[assignment]
+        try:
+            group.start()
+            self.assertTrue(all_opened.wait(1.0))
+            self.assertTrue(group.is_alive())
+        finally:
+            stop_event.set()
+            group.join(timeout=1.0)
+            ble_w2_module.serial = old_serial
+
+        self.assertFalse(group.is_alive())
+        self.assertEqual(set(handles), {"COM7", "COM8"})
+        for handle in handles.values():
+            assert isinstance(handle, WaitingSerialHandle)
+            self.assertEqual(
+                handle.writes,
+                [W2CommandBuilder.start_emg_raw(), W2CommandBuilder.stop_collect()],
+            )
+            self.assertTrue(handle.closed)
 
 
 if __name__ == "__main__":

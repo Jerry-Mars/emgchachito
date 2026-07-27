@@ -6,7 +6,7 @@ import unittest
 
 from fundamental.acquisition import AcquisitionController
 from fundamental.messages import AcquisitionState, SerialConfig, WorkerEvent
-from fundamental.sources.ble_w2 import BLEW2Source
+from fundamental.sources.ble_w2 import BLEW2Source, W2SerialDeviceConfig
 from fundamental.sources.myo import MyoSource
 from fundamental.sources.serial_ads1299 import ADS1299_STREAM_SPEC, SerialADS1299Source
 from fundamental.streams import CaptureResumeState, StreamBlock, StreamSpec
@@ -143,6 +143,47 @@ class AcquisitionSourceTests(unittest.TestCase):
         self.assertEqual(
             controller.update_w2_config(address="", device_name_filter=""),
             "W2 BLE address and name filter cannot both be empty.",
+        )
+
+    def test_w2_serial_config_supports_multiple_ports_as_one_source(self) -> None:
+        controller = AcquisitionController()
+        devices = (
+            W2SerialDeviceConfig(channel_id="left", port="COM7"),
+            W2SerialDeviceConfig(channel_id="right", port="COM8"),
+        )
+
+        error = controller.update_w2_config(transport="serial", serial_devices=devices)
+
+        self.assertIsNone(error)
+        self.assertEqual(controller.w2_config.transport, "serial")
+        self.assertEqual(controller.w2_config.serial_devices, devices)
+        self.assertEqual(
+            tuple(spec.stream_id for spec in controller.w2_source.stream_specs()),
+            ("ble_w2.serial.left.signal", "ble_w2.serial.right.signal"),
+        )
+
+    def test_w2_serial_config_rejects_duplicate_channels_and_ports(self) -> None:
+        controller = AcquisitionController()
+
+        self.assertEqual(
+            controller.update_w2_config(
+                transport="serial",
+                serial_devices=(
+                    W2SerialDeviceConfig(channel_id="ch1", port="COM7"),
+                    W2SerialDeviceConfig(channel_id="CH1", port="COM8"),
+                ),
+            ),
+            "W2 serial channel IDs must be unique.",
+        )
+        self.assertEqual(
+            controller.update_w2_config(
+                transport="serial",
+                serial_devices=(
+                    W2SerialDeviceConfig(channel_id="ch1", port="COM7"),
+                    W2SerialDeviceConfig(channel_id="ch2", port="com7"),
+                ),
+            ),
+            "Each W2 serial channel must use a different Port.",
         )
 
     def test_sources_expose_data_inspection_text(self) -> None:

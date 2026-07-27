@@ -11,7 +11,12 @@ from fundamental.app_shell import FundamentalApp
 from fundamental.commands import CommandContext, CommandSpec
 from fundamental.messages import AcquisitionState
 from fundamental.sources.base import SourceName
-from fundamental.sources.ble_w2 import BLEW2Source, W2_MODE_NAMES
+from fundamental.sources.ble_w2 import (
+    BLEW2Source,
+    W2SerialDeviceConfig,
+    W2_MODE_NAMES,
+    W2_TRANSPORT_NAMES,
+)
 from fundamental.sources.myo import MyoSource
 from fundamental.sources.serial_ads1299 import SerialADS1299Source
 from fundamental.window_manager import ManagedWindow
@@ -24,6 +29,12 @@ SERIAL_PORT_INPUT_TAG = "fundamental.source_config.serial_port"
 SERIAL_BAUD_INPUT_TAG = "fundamental.source_config.serial_baud"
 SERIAL_TIMEOUT_INPUT_TAG = "fundamental.source_config.serial_timeout"
 W2_GROUP_TAG = "fundamental.source_config.w2_group"
+W2_TRANSPORT_INPUT_TAG = "fundamental.source_config.w2_transport"
+W2_BLE_CONNECTION_GROUP_TAG = "fundamental.source_config.w2_ble_connection"
+W2_SERIAL_CONNECTION_GROUP_TAG = "fundamental.source_config.w2_serial_connection"
+W2_SERIAL_DEVICE_LIST_TAG = "fundamental.source_config.w2_serial_devices"
+W2_SERIAL_BAUD_INPUT_TAG = "fundamental.source_config.w2_serial_baud"
+W2_SERIAL_TIMEOUT_INPUT_TAG = "fundamental.source_config.w2_serial_timeout"
 W2_ADDRESS_INPUT_TAG = "fundamental.source_config.w2_address"
 W2_NAME_FILTER_INPUT_TAG = "fundamental.source_config.w2_name_filter"
 W2_NOTIFY_UUID_INPUT_TAG = "fundamental.source_config.w2_notify_uuid"
@@ -40,6 +51,8 @@ MYO_ENABLE_EMG_TAG = "fundamental.source_config.myo_enable_emg"
 MYO_ENABLE_IMU_TAG = "fundamental.source_config.myo_enable_imu"
 SUMMARY_TEXT_TAG = "fundamental.source_config.summary"
 INSPECTION_LIST_TAG = "fundamental.source_config.inspection"
+
+_w2_serial_editor_row_count = 0
 
 SOURCE_LABELS: dict[SourceName, str] = {
     SerialADS1299Source.name: SerialADS1299Source.display_name,
@@ -79,7 +92,7 @@ def _build_window(app: FundamentalApp, controller: AcquisitionController) -> Non
         tag=SOURCE_CONFIG_WINDOW_TAG,
         show=False,
         width=680,
-        height=590,
+        height=680,
         pos=(160, 120),
     ):
         dpg.add_combo(
@@ -99,14 +112,53 @@ def _build_window(app: FundamentalApp, controller: AcquisitionController) -> Non
             dpg.add_input_float(tag=SERIAL_TIMEOUT_INPUT_TAG, label="Timeout (s)", width=260, step=0.01)
 
         with dpg.group(tag=W2_GROUP_TAG):
-            dpg.add_text("BLE W2")
-            dpg.add_input_text(tag=W2_ADDRESS_INPUT_TAG, label="Address", width=340)
-            dpg.add_input_text(tag=W2_NAME_FILTER_INPUT_TAG, label="Name Filter", width=340)
-            dpg.add_input_text(tag=W2_NOTIFY_UUID_INPUT_TAG, label="Notify UUID", width=430)
-            dpg.add_input_text(tag=W2_WRITE_UUID_INPUT_TAG, label="Write UUID", width=430)
+            dpg.add_text("W2")
+            dpg.add_combo(
+                tag=W2_TRANSPORT_INPUT_TAG,
+                label="Transport",
+                items=list(W2_TRANSPORT_NAMES),
+                width=220,
+                callback=lambda *_: _refresh_w2_connection_groups(),
+            )
+            with dpg.group(tag=W2_BLE_CONNECTION_GROUP_TAG):
+                dpg.add_input_text(tag=W2_ADDRESS_INPUT_TAG, label="Address", width=340)
+                dpg.add_input_text(tag=W2_NAME_FILTER_INPUT_TAG, label="Name Filter", width=340)
+                dpg.add_input_text(tag=W2_NOTIFY_UUID_INPUT_TAG, label="Notify UUID", width=430)
+                dpg.add_input_text(tag=W2_WRITE_UUID_INPUT_TAG, label="Write UUID", width=430)
+                dpg.add_input_float(
+                    tag=W2_SCAN_TIMEOUT_INPUT_TAG,
+                    label="Scan Timeout (s)",
+                    width=220,
+                    step=0.5,
+                )
+            with dpg.group(tag=W2_SERIAL_CONNECTION_GROUP_TAG):
+                dpg.add_input_int(
+                    tag=W2_SERIAL_BAUD_INPUT_TAG,
+                    label="Baud",
+                    width=220,
+                    min_value=1,
+                    min_clamped=True,
+                )
+                dpg.add_input_float(
+                    tag=W2_SERIAL_TIMEOUT_INPUT_TAG,
+                    label="Timeout (s)",
+                    width=220,
+                    step=0.01,
+                )
+                dpg.add_button(
+                    label="Add Serial Channel",
+                    width=160,
+                    callback=lambda *_: _add_w2_serial_channel(app),
+                )
+                with dpg.child_window(
+                    tag=W2_SERIAL_DEVICE_LIST_TAG,
+                    width=-1,
+                    height=180,
+                    horizontal_scrollbar=True,
+                ):
+                    pass
             dpg.add_combo(tag=W2_MODE_INPUT_TAG, label="Mode", items=list(W2_MODE_NAMES), width=220)
             dpg.add_input_float(tag=W2_SAMPLE_RATE_INPUT_TAG, label="Sample Rate (Hz)", width=220, step=10.0)
-            dpg.add_input_float(tag=W2_SCAN_TIMEOUT_INPUT_TAG, label="Scan Timeout (s)", width=220, step=0.5)
 
         with dpg.group(tag=MYO_GROUP_TAG):
             dpg.add_text("Myo Armband BLE")
@@ -159,6 +211,7 @@ def _apply_from_window(app: FundamentalApp, controller: AcquisitionController) -
         )
     elif source_name == BLEW2Source.name:
         error = controller.update_w2_config(
+            transport=str(dpg.get_value(W2_TRANSPORT_INPUT_TAG)).strip(),
             address=str(dpg.get_value(W2_ADDRESS_INPUT_TAG)).strip(),
             device_name_filter=str(dpg.get_value(W2_NAME_FILTER_INPUT_TAG)).strip(),
             notify_uuid=str(dpg.get_value(W2_NOTIFY_UUID_INPUT_TAG)).strip(),
@@ -166,6 +219,9 @@ def _apply_from_window(app: FundamentalApp, controller: AcquisitionController) -
             mode=str(dpg.get_value(W2_MODE_INPUT_TAG)).strip(),
             sample_rate_hz=float(dpg.get_value(W2_SAMPLE_RATE_INPUT_TAG)),
             scan_timeout_s=float(dpg.get_value(W2_SCAN_TIMEOUT_INPUT_TAG)),
+            serial_baud_rate=int(dpg.get_value(W2_SERIAL_BAUD_INPUT_TAG)),
+            serial_timeout_s=float(dpg.get_value(W2_SERIAL_TIMEOUT_INPUT_TAG)),
+            serial_devices=_w2_serial_devices_from_window(),
         )
     else:
         error = controller.update_myo_config(
@@ -202,6 +258,7 @@ def _sync_window(controller: AcquisitionController) -> None:
     dpg.set_value(SERIAL_TIMEOUT_INPUT_TAG, serial_config.timeout_s)
 
     w2_config = controller.w2_config
+    dpg.set_value(W2_TRANSPORT_INPUT_TAG, w2_config.transport)
     dpg.set_value(W2_ADDRESS_INPUT_TAG, w2_config.address)
     dpg.set_value(W2_NAME_FILTER_INPUT_TAG, w2_config.device_name_filter)
     dpg.set_value(W2_NOTIFY_UUID_INPUT_TAG, w2_config.notify_uuid)
@@ -209,6 +266,9 @@ def _sync_window(controller: AcquisitionController) -> None:
     dpg.set_value(W2_MODE_INPUT_TAG, w2_config.mode)
     dpg.set_value(W2_SAMPLE_RATE_INPUT_TAG, w2_config.sample_rate_hz)
     dpg.set_value(W2_SCAN_TIMEOUT_INPUT_TAG, w2_config.scan_timeout_s)
+    dpg.set_value(W2_SERIAL_BAUD_INPUT_TAG, w2_config.serial_baud_rate)
+    dpg.set_value(W2_SERIAL_TIMEOUT_INPUT_TAG, w2_config.serial_timeout_s)
+    _set_w2_serial_devices(w2_config.serial_devices)
 
     myo_config = controller.myo_config
     dpg.set_value(MYO_ADDRESS_INPUT_TAG, myo_config.address)
@@ -227,7 +287,85 @@ def _refresh_source_groups(controller: AcquisitionController) -> None:
     _configure_if_exists(SERIAL_GROUP_TAG, show=selected == SerialADS1299Source.name)
     _configure_if_exists(W2_GROUP_TAG, show=selected == BLEW2Source.name)
     _configure_if_exists(MYO_GROUP_TAG, show=selected == MyoSource.name)
+    _refresh_w2_connection_groups()
     _refresh_inspection(controller)
+
+
+def _refresh_w2_connection_groups() -> None:
+    if not dpg.does_item_exist(W2_TRANSPORT_INPUT_TAG):
+        return
+    transport = str(dpg.get_value(W2_TRANSPORT_INPUT_TAG)).strip()
+    _configure_if_exists(W2_BLE_CONNECTION_GROUP_TAG, show=transport == "ble")
+    _configure_if_exists(W2_SERIAL_CONNECTION_GROUP_TAG, show=transport == "serial")
+
+
+def _w2_serial_field_tag(index: int, field_name: str) -> str:
+    return f"fundamental.source_config.w2_serial.{index}.{field_name}"
+
+
+def _w2_serial_devices_from_window() -> tuple[W2SerialDeviceConfig, ...]:
+    devices: list[W2SerialDeviceConfig] = []
+    for index in range(_w2_serial_editor_row_count):
+        channel_tag = _w2_serial_field_tag(index, "channel_id")
+        if not dpg.does_item_exist(channel_tag):
+            continue
+        devices.append(
+            W2SerialDeviceConfig(
+                channel_id=str(dpg.get_value(channel_tag)).strip(),
+                port=str(dpg.get_value(_w2_serial_field_tag(index, "port"))).strip(),
+            ).normalized()
+        )
+    return tuple(devices)
+
+
+def _set_w2_serial_devices(devices: tuple[W2SerialDeviceConfig, ...]) -> None:
+    global _w2_serial_editor_row_count
+    if not dpg.does_item_exist(W2_SERIAL_DEVICE_LIST_TAG):
+        return
+
+    normalized = tuple(device.normalized() for device in devices)
+    dpg.delete_item(W2_SERIAL_DEVICE_LIST_TAG, children_only=True)
+    _w2_serial_editor_row_count = len(normalized)
+    for index, device in enumerate(normalized):
+        with dpg.group(horizontal=True, parent=W2_SERIAL_DEVICE_LIST_TAG):
+            dpg.add_input_text(
+                tag=_w2_serial_field_tag(index, "channel_id"),
+                label="Channel",
+                default_value=device.channel_id,
+                width=100,
+            )
+            dpg.add_input_text(
+                tag=_w2_serial_field_tag(index, "port"),
+                label="Port",
+                default_value=device.port,
+                width=90,
+            )
+            dpg.add_button(
+                label="Remove",
+                user_data=index,
+                callback=lambda _sender, _app_data, user_data: _remove_w2_serial_channel(
+                    int(user_data)
+                ),
+            )
+
+
+def _add_w2_serial_channel(app: FundamentalApp) -> None:
+    devices = list(_w2_serial_devices_from_window())
+    used_ids = {device.channel_id.casefold() for device in devices}
+    next_index = 1
+    while f"ch{next_index}".casefold() in used_ids:
+        next_index += 1
+    devices.append(W2SerialDeviceConfig(channel_id=f"ch{next_index}", port=""))
+    _set_w2_serial_devices(tuple(devices))
+    app.log(f"Added W2 serial channel ch{next_index}; select its Port before applying.")
+
+
+def _remove_w2_serial_channel(index: int) -> None:
+    devices = list(_w2_serial_devices_from_window())
+    if not 0 <= index < len(devices):
+        return
+    del devices[index]
+    _set_w2_serial_devices(tuple(devices))
 
 
 def _refresh_inspection(controller: AcquisitionController) -> None:

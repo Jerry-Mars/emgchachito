@@ -17,7 +17,13 @@ from fundamental.messages import (
     WorkerEvent,
 )
 from fundamental.sources.base import AcquisitionSource, SourceName, SourceWorker
-from fundamental.sources.ble_w2 import BLEW2Source, W2BLEConfig, W2_MODE_NAMES
+from fundamental.sources.ble_w2 import (
+    BLEW2Source,
+    W2BLEConfig,
+    W2SerialDeviceConfig,
+    W2_MODE_NAMES,
+    W2_TRANSPORT_NAMES,
+)
 from fundamental.sources.myo import MyoBLEConfig, MyoSource
 from fundamental.sources.serial_ads1299 import SerialADS1299Source
 from fundamental.streams import StreamBlock
@@ -151,6 +157,10 @@ class AcquisitionController:
         mode: str | None = None,
         sample_rate_hz: float | None = None,
         scan_timeout_s: float | None = None,
+        transport: str | None = None,
+        serial_baud_rate: int | None = None,
+        serial_timeout_s: float | None = None,
+        serial_devices: tuple[W2SerialDeviceConfig, ...] | None = None,
     ) -> str | None:
         if self.state != AcquisitionState.STOPPED:
             return "Stop acquisition before changing W2 BLE configuration."
@@ -158,7 +168,11 @@ class AcquisitionController:
         mode_value = self.w2_config.mode if mode is None else mode.strip()
         if mode_value not in W2_MODE_NAMES:
             return f"Unsupported W2 BLE mode: {mode_value}"
+        transport_value = self.w2_config.transport if transport is None else transport.strip()
+        if transport_value not in W2_TRANSPORT_NAMES:
+            return f"Unsupported W2 transport: {transport_value}"
         next_config = W2BLEConfig(
+            transport=cast(Any, transport_value),
             address=self.w2_config.address if address is None else address,
             device_name_filter=(
                 self.w2_config.device_name_filter if device_name_filter is None else device_name_filter
@@ -168,13 +182,38 @@ class AcquisitionController:
             mode=cast(W2ModeName, mode_value),
             sample_rate_hz=self.w2_config.sample_rate_hz if sample_rate_hz is None else sample_rate_hz,
             scan_timeout_s=self.w2_config.scan_timeout_s if scan_timeout_s is None else scan_timeout_s,
+            serial_baud_rate=(
+                self.w2_config.serial_baud_rate
+                if serial_baud_rate is None
+                else serial_baud_rate
+            ),
+            serial_timeout_s=(
+                self.w2_config.serial_timeout_s
+                if serial_timeout_s is None
+                else serial_timeout_s
+            ),
+            serial_devices=self.w2_config.serial_devices if serial_devices is None else serial_devices,
         ).normalized()
-        if not next_config.notify_uuid:
-            return "W2 BLE notify UUID cannot be empty."
-        if not next_config.write_uuid:
-            return "W2 BLE write UUID cannot be empty."
-        if not next_config.address and not next_config.device_name_filter:
-            return "W2 BLE address and name filter cannot both be empty."
+        if next_config.transport == "ble":
+            if not next_config.notify_uuid:
+                return "W2 BLE notify UUID cannot be empty."
+            if not next_config.write_uuid:
+                return "W2 BLE write UUID cannot be empty."
+            if not next_config.address and not next_config.device_name_filter:
+                return "W2 BLE address and name filter cannot both be empty."
+        else:
+            if not next_config.serial_devices:
+                return "Configure at least one W2 serial channel."
+            if any(not device.channel_id for device in next_config.serial_devices):
+                return "W2 serial channel ID cannot be empty."
+            if any(not device.port for device in next_config.serial_devices):
+                return "W2 serial Port cannot be empty."
+            channel_ids = [device.channel_id.casefold() for device in next_config.serial_devices]
+            if len(set(channel_ids)) != len(channel_ids):
+                return "W2 serial channel IDs must be unique."
+            ports = [device.port.casefold() for device in next_config.serial_devices]
+            if len(set(ports)) != len(ports):
+                return "Each W2 serial channel must use a different Port."
 
         self.w2_source = self.w2_source.with_config(next_config)
         if self.source_name == BLEW2Source.name:

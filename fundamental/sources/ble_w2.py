@@ -1,16 +1,19 @@
-"""BLE source for the RunE W2 demo device."""
+"""BLE and serial source for RunE W2 devices."""
 
 from __future__ import annotations
 
 import asyncio
 import queue
 import threading
+import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar, Literal
 
 from DeviceInterface.w2_protocol import W2CommandBuilder, W2Packet, W2RmsPacket, W2StreamParser
 from fundamental.messages import (
     DEFAULT_MAX_FRAMES_PER_BATCH,
+    DEFAULT_SERIAL_PORT,
+    DEFAULT_SERIAL_TIMEOUT,
     WorkerEvent,
 )
 from fundamental.sources.base import SourceName, SourceWorker
@@ -24,6 +27,11 @@ except ImportError:  # pragma: no cover - depends on local runtime
     BleakScanner = None
     BleakBluetoothNotAvailableError = None
 
+try:
+    import serial
+except ImportError:  # pragma: no cover - depends on local runtime
+    serial = None
+
 
 DEFAULT_W2_DEVICE_NAME = "RunE W2"
 # The address in device_host_demo/main.py belongs to the demo unit. Scanning by
@@ -32,13 +40,33 @@ DEFAULT_W2_ADDRESS = ""
 DEFAULT_W2_NOTIFY_UUID = "0000FFF4-0000-1000-8000-00805F9B34FB"
 DEFAULT_W2_WRITE_UUID = "0000FFF3-0000-1000-8000-00805F9B34FB"
 DEFAULT_W2_SAMPLE_RATE_HZ = 1000.0
+DEFAULT_W2_SERIAL_BAUD_RATE = 25600
 W2_MODE_NAMES = ("emg_raw", "emg_rms", "eeg_raw")
+W2_TRANSPORT_NAMES = ("ble", "serial")
 W2_STREAM_ID = "ble_w2.signal"
+W2TransportName = Literal["ble", "serial"]
+
+
+@dataclass(frozen=True)
+class W2SerialDeviceConfig:
+    """Connection settings for one W2 serial device/channel."""
+
+    channel_id: str = "ch1"
+    port: str = DEFAULT_SERIAL_PORT
+
+    def normalized(self) -> "W2SerialDeviceConfig":
+        return W2SerialDeviceConfig(
+            channel_id=self.channel_id.strip(),
+            port=self.port.strip(),
+        )
+
+    def display_text(self) -> str:
+        return f"{self.channel_id or '-'}={self.port or '-'}"
 
 
 @dataclass(frozen=True)
 class W2BLEConfig:
-    """Connection and acquisition settings for a W2 BLE source."""
+    """Connection and acquisition settings for the W2 source."""
 
     address: str = DEFAULT_W2_ADDRESS
     device_name_filter: str = DEFAULT_W2_DEVICE_NAME
@@ -47,10 +75,20 @@ class W2BLEConfig:
     mode: Literal["emg_raw", "emg_rms", "eeg_raw"] = "emg_raw"
     sample_rate_hz: float = DEFAULT_W2_SAMPLE_RATE_HZ
     scan_timeout_s: float = 5.0
+    transport: W2TransportName = "ble"
+    serial_baud_rate: int = DEFAULT_W2_SERIAL_BAUD_RATE
+    serial_timeout_s: float = DEFAULT_SERIAL_TIMEOUT
+    serial_devices: tuple[W2SerialDeviceConfig, ...] = field(
+        default_factory=lambda: (W2SerialDeviceConfig(),)
+    )
 
     def normalized(self) -> "W2BLEConfig":
         mode = self.mode if self.mode in W2_MODE_NAMES else "emg_raw"
+        transport: W2TransportName = (
+            self.transport if self.transport in W2_TRANSPORT_NAMES else "ble"
+        )
         return W2BLEConfig(
+            transport=transport,
             address=self.address.strip(),
             device_name_filter=self.device_name_filter.strip(),
             notify_uuid=self.notify_uuid.strip(),
@@ -58,14 +96,34 @@ class W2BLEConfig:
             mode=mode,
             sample_rate_hz=max(0.001, float(self.sample_rate_hz)),
             scan_timeout_s=max(0.1, float(self.scan_timeout_s)),
+            serial_baud_rate=max(1, int(self.serial_baud_rate)),
+            serial_timeout_s=max(0.001, float(self.serial_timeout_s)),
+            serial_devices=tuple(device.normalized() for device in self.serial_devices),
         )
 
     def display_text(self) -> str:
+        if self.transport == "serial":
+            devices = "; ".join(device.display_text() for device in self.serial_devices) or "none"
+            return (
+                f"W2 Serial [{devices}] @ {self.serial_baud_rate}, "
+                f"timeout {self.serial_timeout_s:.3f}s, mode {self.mode}"
+            )
         target = self.address.strip() or f"name contains {self.device_name_filter!r}"
         return f"W2 BLE {target}, notify {self.notify_uuid}, write {self.write_uuid}, mode {self.mode}"
 
 
-def w2_stream_spec(config: W2BLEConfig) -> StreamSpec:
+def w2_serial_stream_id(channel_id: str) -> str:
+    """Build the stable stream identity for one configured serial channel."""
+
+    return f"ble_w2.serial.{channel_id.strip()}.signal"
+
+
+def w2_stream_spec(
+    config: W2BLEConfig,
+    *,
+    stream_id: str = W2_STREAM_ID,
+    channel_label: str | None = None,
+) -> StreamSpec:
     kind = {
         "emg_raw": "emg",
         "emg_rms": "generic",
@@ -76,14 +134,15 @@ def w2_stream_spec(config: W2BLEConfig) -> StreamSpec:
         "emg_rms": "EMG RMS",
         "eeg_raw": "EEG Raw",
     }[config.mode]
+    display_label = f"{channel_label} {label}" if channel_label else label
     return StreamSpec(
-        stream_id=W2_STREAM_ID,
-        display_name=f"W2 {label}",
+        stream_id=stream_id,
+        display_name=f"W2 {display_label}",
         nominal_rate_hz=config.sample_rate_hz,
         fields=(
             FieldSpec(
                 "value",
-                label,
+                display_label,
                 unit="code",
                 signal_kind=kind,
                 default_plot=True,
@@ -124,7 +183,83 @@ class W2StreamAdapter:
         return StreamBlock(self.spec, times, tuple((value,) for value in values))
 
 
-class BLEW2Worker(threading.Thread):
+class _W2StreamWorker(threading.Thread):
+    """Shared W2 byte-stream decoding and batching for every transport."""
+
+    def __init__(
+        self,
+        *,
+        thread_name: str,
+        config: W2BLEConfig,
+        spec: StreamSpec,
+        data_queue: queue.Queue[StreamBlock],
+        event_queue: queue.Queue[WorkerEvent],
+        stop_event: threading.Event,
+        resume_state: CaptureResumeState,
+        max_frames_per_batch: int,
+    ) -> None:
+        super().__init__(name=thread_name, daemon=True)
+        self.config = config
+        self.data_queue = data_queue
+        self.event_queue = event_queue
+        self.stop_event = stop_event
+        self.max_frames_per_batch = max(1, int(max_frames_per_batch))
+        self.parser = W2StreamParser()
+        self.spec = spec
+        self.adapter = W2StreamAdapter(
+            spec=self.spec,
+            sample_rate_hz=config.sample_rate_hz,
+            resume_state=resume_state,
+        )
+        self._times: list[float] = []
+        self._rows: list[tuple[int | float, ...]] = []
+        self._last_logged_parser_counters = (0, 0, 0)
+        self.rx_byte_count = 0
+        self.decoded_packet_count = 0
+
+    def _consume_data(self, received_data: bytes | bytearray) -> None:
+        self.rx_byte_count += len(received_data)
+        packets = self.parser.feed(bytes(received_data))
+        self.decoded_packet_count += len(packets)
+        for packet in packets:
+            block = self.adapter.packet_to_block(packet)
+            self._times.extend(block.time_s)
+            self._rows.extend(block.rows)
+            if len(self._rows) >= self.max_frames_per_batch:
+                self._flush()
+
+        self._log_parser_counters_if_changed()
+
+    def _log_parser_counters_if_changed(self) -> None:
+        counters = (
+            self.parser.bad_checksum_count,
+            self.parser.bad_tail_count,
+            self.parser.bad_payload_count,
+        )
+        if counters == self._last_logged_parser_counters:
+            return
+        self._last_logged_parser_counters = counters
+
+        if any(counters):
+            self.event_queue.put(
+                WorkerEvent(
+                    "log",
+                    f"W2 parser counters for {self.spec.stream_id}: "
+                    f"bad_checksum={self.parser.bad_checksum_count}, "
+                    f"bad_tail={self.parser.bad_tail_count}, "
+                    f"bad_payload={self.parser.bad_payload_count}.",
+                )
+            )
+
+    def _flush(self) -> None:
+        if not self._rows:
+            return
+        self.data_queue.put(StreamBlock(self.spec, tuple(self._times), tuple(self._rows)))
+        self._times.clear()
+        self._rows.clear()
+
+
+class BLEW2Worker(_W2StreamWorker):
     """Connect to a W2 BLE device and publish StreamBlock objects."""
 
     def __init__(
@@ -136,25 +271,17 @@ class BLEW2Worker(threading.Thread):
         resume_state: CaptureResumeState = CaptureResumeState(),
         max_frames_per_batch: int = DEFAULT_MAX_FRAMES_PER_BATCH,
     ) -> None:
-        super().__init__(name="BLEW2Worker", daemon=True)
-        self.config = config
-        self.data_queue = data_queue
-        self.event_queue = event_queue
-        self.stop_event = stop_event
-        self.max_frames_per_batch = max(1, int(max_frames_per_batch))
-        self.parser = W2StreamParser()
-        self.spec = w2_stream_spec(config)
-        self.adapter = W2StreamAdapter(
-            spec=self.spec,
-            sample_rate_hz=config.sample_rate_hz,
+        super().__init__(
+            thread_name="BLEW2Worker",
+            config=config,
+            spec=w2_stream_spec(config),
+            data_queue=data_queue,
+            event_queue=event_queue,
+            stop_event=stop_event,
             resume_state=resume_state,
+            max_frames_per_batch=max_frames_per_batch,
         )
-        self._times: list[float] = []
-        self._rows: list[tuple[int | float, ...]] = []
-        self._last_logged_parser_counters = (0, 0, 0)
         self.notification_count = 0
-        self.rx_byte_count = 0
-        self.decoded_packet_count = 0
         self._resolved_device = None
 
     def run(self) -> None:
@@ -275,9 +402,6 @@ class BLEW2Worker(threading.Thread):
 
     def _handle_notification(self, _sender, received_data: bytearray) -> None:
         self.notification_count += 1
-        self.rx_byte_count += len(received_data)
-        packets = self.parser.feed(bytes(received_data))
-        self.decoded_packet_count += len(packets)
         if self.notification_count == 1:
             preview = bytes(received_data[:32]).hex(" ")
             self.event_queue.put(
@@ -286,52 +410,228 @@ class BLEW2Worker(threading.Thread):
                     f"Received first W2 notification ({len(received_data)} bytes): {preview}",
                 )
             )
-        for packet in packets:
-            block = self.adapter.packet_to_block(packet)
-            self._times.extend(block.time_s)
-            self._rows.extend(block.rows)
-            if len(self._rows) >= self.max_frames_per_batch:
-                self._flush()
+        self._consume_data(received_data)
 
-        self._log_parser_counters_if_changed()
 
-    def _log_parser_counters_if_changed(self) -> None:
-        counters = (
-            self.parser.bad_checksum_count,
-            self.parser.bad_tail_count,
-            self.parser.bad_payload_count,
+class SerialW2Worker(_W2StreamWorker):
+    """Read one W2 device through pyserial using the unchanged W2 protocol."""
+
+    def __init__(
+        self,
+        config: W2BLEConfig,
+        serial_config: W2SerialDeviceConfig,
+        spec: StreamSpec,
+        data_queue: queue.Queue[StreamBlock],
+        event_queue: queue.Queue[WorkerEvent],
+        stop_event: threading.Event,
+        resume_state: CaptureResumeState = CaptureResumeState(),
+        max_frames_per_batch: int = DEFAULT_MAX_FRAMES_PER_BATCH,
+    ) -> None:
+        self.serial_config = serial_config.normalized()
+        super().__init__(
+            thread_name=f"SerialW2Worker-{self.serial_config.channel_id}",
+            config=config,
+            spec=spec,
+            data_queue=data_queue,
+            event_queue=event_queue,
+            stop_event=stop_event,
+            resume_state=resume_state,
+            max_frames_per_batch=max_frames_per_batch,
         )
-        if counters == self._last_logged_parser_counters:
-            return
-        self._last_logged_parser_counters = counters
+        self.read_count = 0
+        self.first_rx_preview = ""
 
-        if any(counters):
+    def run(self) -> None:
+        if serial is None:
+            self.event_queue.put(
+                WorkerEvent("error", "pyserial is not installed; W2 serial acquisition is unavailable.")
+            )
+            return
+        if not self.serial_config.port:
+            self.event_queue.put(
+                WorkerEvent("error", f"W2 serial port is empty for {self.serial_config.channel_id}.")
+            )
+            return
+        if self.stop_event.is_set():
+            self.event_queue.put(
+                WorkerEvent("log", f"W2 serial start cancelled for {self.serial_config.channel_id}.")
+            )
+            return
+
+        serial_handle = None
+        collection_started = False
+        try:
+            serial_handle = serial.Serial(
+                self.serial_config.port,
+                self.config.serial_baud_rate,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=self.config.serial_timeout_s,
+            )
+            serial_handle.reset_input_buffer()
             self.event_queue.put(
                 WorkerEvent(
                     "log",
-                    "W2 parser counters: "
-                    f"bad_checksum={self.parser.bad_checksum_count}, "
-                    f"bad_tail={self.parser.bad_tail_count}, "
-                    f"bad_payload={self.parser.bad_payload_count}.",
+                    f"Opened W2 serial channel {self.serial_config.display_text()} @ "
+                    f"{self.config.serial_baud_rate}, timeout "
+                    f"{self.config.serial_timeout_s:.3f}s.",
                 )
             )
 
-    def _flush(self) -> None:
-        if not self._rows:
+            serial_handle.write(W2CommandBuilder.start_for_mode(self.config.mode))
+            serial_handle.flush()
+            collection_started = True
+            self.event_queue.put(
+                WorkerEvent(
+                    "log",
+                    f"Started W2 collection mode {self.config.mode} on "
+                    f"{self.serial_config.channel_id}.",
+                )
+            )
+
+            last_diagnostic_s = time.monotonic()
+            while not self.stop_event.is_set():
+                chunk = serial_handle.read(512)
+                if not chunk:
+                    self._flush()
+                    last_diagnostic_s = self._report_no_frames_if_due(last_diagnostic_s)
+                    continue
+
+                self.read_count += 1
+                if not self.first_rx_preview:
+                    self.first_rx_preview = bytes(chunk[:32]).hex(" ")
+                    self.event_queue.put(
+                        WorkerEvent(
+                            "log",
+                            f"Received first W2 serial chunk on {self.serial_config.channel_id} "
+                            f"({len(chunk)} bytes): {self.first_rx_preview}",
+                        )
+                    )
+                self._consume_data(chunk)
+                last_diagnostic_s = self._report_no_frames_if_due(last_diagnostic_s)
+        except serial.SerialException as exc:
+            self.event_queue.put(
+                WorkerEvent(
+                    "error",
+                    f"W2 serial failure on {self.serial_config.channel_id} "
+                    f"({self.serial_config.port}): {exc}",
+                )
+            )
+        except OSError as exc:
+            self.event_queue.put(
+                WorkerEvent(
+                    "error",
+                    f"W2 serial device error on {self.serial_config.channel_id} "
+                    f"({self.serial_config.port}): {exc}",
+                )
+            )
+        finally:
+            self._stop_serial(serial_handle, send_stop_command=collection_started)
+
+    def _report_no_frames_if_due(self, last_report_s: float) -> float:
+        now = time.monotonic()
+        if self.decoded_packet_count or now - last_report_s < 2.0:
+            return last_report_s
+        if self.rx_byte_count == 0:
+            self.event_queue.put(
+                WorkerEvent(
+                    "log",
+                    f"W2 serial channel {self.serial_config.channel_id} is open but no bytes "
+                    "have arrived. Check the Port, cable, and whether another program owns it.",
+                )
+            )
+            return now
+        self.event_queue.put(
+            WorkerEvent(
+                "log",
+                f"W2 serial bytes are arriving on {self.serial_config.channel_id} but no frame "
+                f"has decoded: rx_bytes={self.rx_byte_count}, buffered={len(self.parser.buffer)}, "
+                f"skipped={self.parser.skipped_bytes}, "
+                f"unsupported={self.parser.unsupported_frame_count}, "
+                f"bad_checksum={self.parser.bad_checksum_count}, "
+                f"bad_tail={self.parser.bad_tail_count}, "
+                f"bad_payload={self.parser.bad_payload_count}, "
+                f"first_bytes={self.first_rx_preview}.",
+            )
+        )
+        return now
+
+    def _stop_serial(self, serial_handle, send_stop_command: bool = True) -> None:
+        if serial_handle is None:
+            self._flush()
             return
-        self.data_queue.put(StreamBlock(self.spec, tuple(self._times), tuple(self._rows)))
-        self._times.clear()
-        self._rows.clear()
+        if send_stop_command:
+            try:
+                serial_handle.write(W2CommandBuilder.stop_collect())
+                serial_handle.flush()
+            except Exception as exc:  # pragma: no cover - hardware/disconnect dependent
+                self.event_queue.put(
+                    WorkerEvent(
+                        "error",
+                        f"Failed to send W2 stop command on {self.serial_config.channel_id}: {exc}",
+                    )
+                )
+        self._flush()
+        try:
+            serial_handle.close()
+            self.event_queue.put(
+                WorkerEvent("log", f"Closed W2 serial channel {self.serial_config.channel_id}.")
+            )
+        except Exception as exc:  # pragma: no cover - hardware dependent
+            self.event_queue.put(
+                WorkerEvent(
+                    "error",
+                    f"Failed to close W2 serial channel {self.serial_config.channel_id}: {exc}",
+                )
+            )
+
+
+class W2WorkerGroup:
+    """Expose several W2 serial workers as one acquisition-source worker."""
+
+    def __init__(
+        self,
+        workers: tuple[SerialW2Worker, ...],
+        data_queue: queue.Queue[StreamBlock],
+        event_queue: queue.Queue[WorkerEvent],
+        stop_event: threading.Event,
+    ) -> None:
+        self.workers = workers
+        self.data_queue = data_queue
+        self.event_queue = event_queue
+        self.stop_event = stop_event
+
+    def start(self) -> None:
+        started: list[SerialW2Worker] = []
+        try:
+            for worker in self.workers:
+                worker.start()
+                started.append(worker)
+        except Exception:
+            self.stop_event.set()
+            for worker in started:
+                worker.join(timeout=1.0)
+            raise
+
+    def is_alive(self) -> bool:
+        return any(worker.is_alive() for worker in self.workers)
+
+    def join(self, timeout: float | None = None) -> None:
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        for worker in self.workers:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            worker.join(timeout=remaining)
 
 
 @dataclass(frozen=True)
 class BLEW2Source:
-    """BLE W2 acquisition source configuration."""
+    """W2 acquisition source with BLE or one-or-more serial connections."""
 
     config: W2BLEConfig = field(default_factory=W2BLEConfig)
 
     name: ClassVar[SourceName] = "ble_w2"
-    display_name: ClassVar[str] = "BLE W2"
+    display_name: ClassVar[str] = "W2 (BLE / Serial)"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "config", self.config.normalized())
@@ -340,21 +640,40 @@ class BLEW2Source:
         return f"{self.display_name}: {self.config.display_text()}"
 
     def inspect_data(self) -> tuple[str, ...]:
+        if self.config.transport == "serial":
+            worker_text = "W2WorkerGroup -> one SerialW2Worker per configured Port"
+            transport_text = "Transport handle: pyserial serial.Serial (8N1, no parity)"
+            frame_text = "Device frame: W2 serial byte stream -> W2RawPacket or W2RmsPacket"
+            stream_text = "Worker output: one uniquely identified StreamBlock per serial channel"
+        else:
+            worker_text = "BLEW2Worker"
+            transport_text = "Transport handle: bleak BleakClient"
+            frame_text = "Device frame: W2 BLE notify frame -> W2RawPacket or W2RmsPacket"
+            stream_text = "Worker output: StreamBlock(stream_id='ble_w2.signal')"
         return (
-            f"Source handle: {type(self).__name__}.create_worker(...) -> BLEW2Worker",
-            "Transport handle: bleak BleakClient",
+            f"Source handle: {type(self).__name__}.create_worker(...) -> {worker_text}",
+            transport_text,
             "Protocol parser: DeviceInterface.w2_protocol.W2StreamParser",
-            "Device frame: W2 BLE notify frame -> W2RawPacket or W2RmsPacket",
-            "Worker output: StreamBlock(stream_id='ble_w2.signal')",
+            frame_text,
+            stream_text,
             "Schema: time_s, value (no ADS-shaped zero padding)",
             f"Current config: {self.config.display_text()}",
         )
 
     def stream_specs(self) -> tuple[StreamSpec, ...]:
-        return (w2_stream_spec(self.config),)
+        if self.config.transport == "ble":
+            return (w2_stream_spec(self.config),)
+        return tuple(
+            w2_stream_spec(
+                self.config,
+                stream_id=w2_serial_stream_id(device.channel_id),
+                channel_label=device.channel_id,
+            )
+            for device in self.config.serial_devices
+        )
 
     def capture_metadata(self) -> dict[str, Any]:
-        return {"transport": "ble", "config": asdict(self.config)}
+        return {"transport": self.config.transport, "config": asdict(self.config)}
 
     def with_config(self, config: W2BLEConfig) -> "BLEW2Source":
         return BLEW2Source(config=config)
@@ -366,19 +685,46 @@ class BLEW2Source:
         stop_event: threading.Event,
         resume_state: CaptureResumeState = CaptureResumeState(),
     ) -> SourceWorker:
-        return BLEW2Worker(
-            config=self.config,
+        if self.config.transport == "ble":
+            return BLEW2Worker(
+                config=self.config,
+                data_queue=data_queue,
+                event_queue=event_queue,
+                stop_event=stop_event,
+                resume_state=resume_state,
+            )
+
+        specs = self.stream_specs()
+        workers = tuple(
+            SerialW2Worker(
+                config=self.config,
+                serial_config=device,
+                spec=spec,
+                data_queue=data_queue,
+                event_queue=event_queue,
+                stop_event=stop_event,
+                resume_state=resume_state,
+            )
+            for device, spec in zip(self.config.serial_devices, specs, strict=True)
+        )
+        return W2WorkerGroup(
+            workers=workers,
             data_queue=data_queue,
             event_queue=event_queue,
             stop_event=stop_event,
-            resume_state=resume_state,
         )
 
 
 __all__ = [
     "BLEW2Source",
     "BLEW2Worker",
+    "DEFAULT_W2_SERIAL_BAUD_RATE",
+    "SerialW2Worker",
     "W2BLEConfig",
+    "W2SerialDeviceConfig",
     "W2StreamAdapter",
+    "W2WorkerGroup",
+    "W2_TRANSPORT_NAMES",
+    "w2_serial_stream_id",
     "w2_stream_spec",
 ]
