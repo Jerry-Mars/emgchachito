@@ -64,6 +64,25 @@ class FakeAcquisition:
         return 0
 
 
+class StartingFakeAcquisition(FakeAcquisition):
+    def __init__(self) -> None:
+        super().__init__()
+        self.finish_start_on_drain = False
+
+    def start(self) -> str:
+        if self.state == AcquisitionState.STOPPED:
+            self.buffer.reset()
+        self.state = AcquisitionState.STARTING
+        self.finish_start_on_drain = True
+        return "Acquisition connecting."
+
+    def drain_queues(self, log_sink=None) -> int:
+        if self.finish_start_on_drain:
+            self.finish_start_on_drain = False
+            self.state = AcquisitionState.RUNNING
+        return super().drain_queues(log_sink)
+
+
 def append_frame(acquisition: FakeAcquisition, time_s: float, counter: int = 1) -> None:
     acquisition.buffer.append_block(
         StreamBlock(
@@ -75,6 +94,21 @@ def append_frame(acquisition: FakeAcquisition, time_s: float, counter: int = 1) 
 
 
 class RecordingSessionTests(unittest.TestCase):
+    def test_stimulus_waits_until_all_acquisition_devices_are_ready(self) -> None:
+        acquisition = StartingFakeAcquisition()
+        stimulus = StimulusController()
+        stimulus.set_schedule([StimulusEvent(4, "ready", 1.0)])
+        session = RecordingSession(acquisition, stimulus)  # type: ignore[arg-type]
+
+        messages = session.start_stimulus()
+        self.assertEqual(acquisition.state, AcquisitionState.STARTING)
+        self.assertEqual(stimulus.state, StimulusState.IDLE)
+        self.assertTrue(any("after all acquisition devices are ready" in item for item in messages))
+
+        session.on_frame()
+        self.assertEqual(acquisition.state, AcquisitionState.RUNNING)
+        self.assertEqual(stimulus.state, StimulusState.RUNNING)
+
     def test_save_includes_stimulus_labels_after_stimulus_session(self) -> None:
         acquisition = FakeAcquisition()
         acquisition.state = AcquisitionState.RUNNING
@@ -148,6 +182,21 @@ class RecordingSessionTests(unittest.TestCase):
         self.assertEqual(acquisition.state, AcquisitionState.STOPPED)
         self.assertEqual(stimulus.state, StimulusState.STOPPED)
         self.assertIn("Stimulus timeline stopped because acquisition stopped.", log)
+
+    def test_on_frame_stops_paused_stimulus_when_managed_connection_fails(self) -> None:
+        acquisition = FakeAcquisition()
+        acquisition.state = AcquisitionState.RUNNING
+        stimulus = StimulusController()
+        stimulus.set_schedule([StimulusEvent(8, "lift", 2.0)])
+        session = RecordingSession(acquisition, stimulus)  # type: ignore[arg-type]
+        session.start_stimulus()
+        session.pause()
+        acquisition.fail_on_drain = True
+
+        session.on_frame()
+
+        self.assertEqual(acquisition.state, AcquisitionState.STOPPED)
+        self.assertEqual(stimulus.state, StimulusState.STOPPED)
 
     def test_on_frame_stops_acquisition_when_stimulus_schedule_completes(self) -> None:
         acquisition = FakeAcquisition()

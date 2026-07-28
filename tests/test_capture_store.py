@@ -3,16 +3,79 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from contextlib import chdir
 from pathlib import Path
 
 from fundamental.capture_store import CaptureStore
-from fundamental.csv_writer import save_capture
+from fundamental.csv_writer import default_capture_path, save_capture
+from fundamental.sources.ble_w2 import BLEW2Source, W2BLEConfig, W2DeviceConfig
+from fundamental.sources.bwt901 import BWT901BLEConfig, BWT901DeviceConfig, BWT901Source
 from fundamental.sources.myo import MYO_EMG_STREAM_SPEC, MYO_IMU_STREAM_SPEC
 from fundamental.sources.serial_ads1299 import ADS1299_STREAM_SPEC
 from fundamental.streams import StreamBlock
 
 
 class CaptureStoreTests(unittest.TestCase):
+    def test_default_capture_path_creates_one_experiment_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, chdir(tmp):
+            path = default_capture_path(create_directory=True)
+            self.assertTrue(path.parent.is_dir())
+            self.assertTrue(path.parent.name.startswith("experiment_"))
+            self.assertEqual(path.name, "capture.csv")
+
+    def test_w2_and_bwt_series_are_exposed_to_the_generic_plot_catalog(self) -> None:
+        w2 = BLEW2Source(
+            W2BLEConfig(
+                devices=(
+                    W2DeviceConfig("left", "serial", port="COM7"),
+                    W2DeviceConfig("right", "serial", port="COM8"),
+                )
+            )
+        )
+        bwt = BWT901Source(
+            BWT901BLEConfig(devices=(BWT901DeviceConfig("imu_1", "AA:BB"),))
+        )
+        store = CaptureStore(stream_specs=(*w2.stream_specs(), *bwt.stream_specs()))
+
+        series_ids = {series.series_id for series in store.series_specs()}
+        self.assertIn("ble_w2.left.signal/value", series_ids)
+        self.assertIn("ble_w2.right.signal/value", series_ids)
+        self.assertIn("bwt901.imu_1.imu/acc_x_g", series_ids)
+        self.assertIn("bwt901.imu_1.imu/gyro_z_dps", series_ids)
+        self.assertIn("bwt901.imu_1.imu/angle_y_deg", series_ids)
+
+    def test_w2_and_bwt_save_as_independent_files_in_one_experiment_folder(self) -> None:
+        w2_spec = BLEW2Source(
+            W2BLEConfig(devices=(W2DeviceConfig("w2_1", "serial", port="COM7"),))
+        ).stream_specs()[0]
+        bwt_spec = BWT901Source().stream_specs()[0]
+        store = CaptureStore(stream_specs=(w2_spec, bwt_spec))
+        store.append_block(StreamBlock(w2_spec, (0.0,), ((12.5,),)))
+        store.append_block(
+            StreamBlock(
+                bwt_spec,
+                (0.001,),
+                ((1, 0.1, 0.2, 0.3, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0),),
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            experiment = Path(tmp) / "experiment_test"
+            result = save_capture(experiment / "capture.csv", store.snapshots())
+            names = {stream.path.name for stream in result.streams}
+            self.assertEqual(
+                names,
+                {"capture.ble_w2_w2_1_signal.csv", "capture.bwt901_imu_1_imu.csv"},
+            )
+            imu_path = next(
+                stream.path for stream in result.streams if stream.stream_id.startswith("bwt901")
+            )
+            self.assertEqual(
+                imu_path.read_text(encoding="utf-8").splitlines()[0],
+                "time_s,sequence,acc_x_g,acc_y_g,acc_z_g,gyro_x_dps,gyro_y_dps,"
+                "gyro_z_dps,angle_x_deg,angle_y_deg,angle_z_deg",
+            )
+
     def test_streams_keep_independent_rates_and_series_windows(self) -> None:
         store = CaptureStore(
             plot_buffer_size=8,

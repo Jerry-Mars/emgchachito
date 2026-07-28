@@ -4,6 +4,7 @@ import unittest
 
 from fundamental.plot_processing import (
     AxisScaler,
+    format_signal_status,
     minmax_downsample,
     moving_average,
     moving_rms,
@@ -55,6 +56,16 @@ class PlotProcessingTests(unittest.TestCase):
 
         self.assertEqual(stats.peak, 4.0)
         self.assertAlmostEqual(stats.rms, 3.5355339059)
+
+    def test_status_keeps_rms_for_emg_and_direct_values_for_imu(self) -> None:
+        self.assertEqual(
+            format_signal_status([-3.0, 4.0], "emg", "code"),
+            "Peak 4.000 code | RMS 3.536",
+        )
+        self.assertEqual(
+            format_signal_status([0.993, 0.995, 0.994], "acceleration", "g"),
+            "Current 0.994 g | Min 0.993 g | Max 0.995 g",
+        )
 
 
 if __name__ == "__main__":

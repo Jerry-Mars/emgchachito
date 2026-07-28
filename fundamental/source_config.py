@@ -1,4 +1,4 @@
-"""Acquisition source selection and configuration window."""
+"""Acquisition source selection and bounded multi-device configuration window."""
 
 from __future__ import annotations
 
@@ -13,9 +13,15 @@ from fundamental.messages import AcquisitionState
 from fundamental.sources.base import SourceName
 from fundamental.sources.ble_w2 import (
     BLEW2Source,
-    W2SerialDeviceConfig,
+    MAX_W2_DEVICES,
+    W2DeviceConfig,
     W2_MODE_NAMES,
     W2_TRANSPORT_NAMES,
+)
+from fundamental.sources.bwt901 import (
+    BWT901DeviceConfig,
+    BWT901Source,
+    MAX_BWT901_DEVICES,
 )
 from fundamental.sources.myo import MyoSource
 from fundamental.sources.serial_ads1299 import SerialADS1299Source
@@ -29,19 +35,18 @@ SERIAL_PORT_INPUT_TAG = "fundamental.source_config.serial_port"
 SERIAL_BAUD_INPUT_TAG = "fundamental.source_config.serial_baud"
 SERIAL_TIMEOUT_INPUT_TAG = "fundamental.source_config.serial_timeout"
 W2_GROUP_TAG = "fundamental.source_config.w2_group"
-W2_TRANSPORT_INPUT_TAG = "fundamental.source_config.w2_transport"
-W2_BLE_CONNECTION_GROUP_TAG = "fundamental.source_config.w2_ble_connection"
-W2_SERIAL_CONNECTION_GROUP_TAG = "fundamental.source_config.w2_serial_connection"
-W2_SERIAL_DEVICE_LIST_TAG = "fundamental.source_config.w2_serial_devices"
+W2_DEVICE_LIST_TAG = "fundamental.source_config.w2_devices"
 W2_SERIAL_BAUD_INPUT_TAG = "fundamental.source_config.w2_serial_baud"
 W2_SERIAL_TIMEOUT_INPUT_TAG = "fundamental.source_config.w2_serial_timeout"
-W2_ADDRESS_INPUT_TAG = "fundamental.source_config.w2_address"
-W2_NAME_FILTER_INPUT_TAG = "fundamental.source_config.w2_name_filter"
 W2_NOTIFY_UUID_INPUT_TAG = "fundamental.source_config.w2_notify_uuid"
 W2_WRITE_UUID_INPUT_TAG = "fundamental.source_config.w2_write_uuid"
 W2_MODE_INPUT_TAG = "fundamental.source_config.w2_mode"
 W2_SAMPLE_RATE_INPUT_TAG = "fundamental.source_config.w2_sample_rate"
 W2_SCAN_TIMEOUT_INPUT_TAG = "fundamental.source_config.w2_scan_timeout"
+W2_INCLUDE_BWT_TAG = "fundamental.source_config.w2_include_bwt"
+BWT_GROUP_TAG = "fundamental.source_config.bwt_group"
+BWT_DEVICE_LIST_TAG = "fundamental.source_config.bwt_devices"
+BWT_SCAN_TIMEOUT_INPUT_TAG = "fundamental.source_config.bwt_scan_timeout"
 MYO_GROUP_TAG = "fundamental.source_config.myo_group"
 MYO_ADDRESS_INPUT_TAG = "fundamental.source_config.myo_address"
 MYO_NAME_FILTER_INPUT_TAG = "fundamental.source_config.myo_name_filter"
@@ -51,12 +56,15 @@ MYO_ENABLE_EMG_TAG = "fundamental.source_config.myo_enable_emg"
 MYO_ENABLE_IMU_TAG = "fundamental.source_config.myo_enable_imu"
 SUMMARY_TEXT_TAG = "fundamental.source_config.summary"
 INSPECTION_LIST_TAG = "fundamental.source_config.inspection"
+HEALTH_LIST_TAG = "fundamental.source_config.health"
 
-_w2_serial_editor_row_count = 0
+_w2_editor_row_count = 0
+_bwt_editor_row_count = 0
 
 SOURCE_LABELS: dict[SourceName, str] = {
     SerialADS1299Source.name: SerialADS1299Source.display_name,
     BLEW2Source.name: BLEW2Source.display_name,
+    BWT901Source.name: BWT901Source.display_name,
     MyoSource.name: MyoSource.display_name,
 }
 SOURCE_NAMES_BY_LABEL = {label: name for name, label in SOURCE_LABELS.items()}
@@ -78,6 +86,7 @@ def register(app: FundamentalApp, controller: AcquisitionController) -> None:
             aliases=("device",),
         )
     )
+    app.register_frame_callback(lambda _frame_app: _refresh_health(controller))
 
 
 def _open_window(context: CommandContext, controller: AcquisitionController) -> str | None:
@@ -91,74 +100,115 @@ def _build_window(app: FundamentalApp, controller: AcquisitionController) -> Non
         label="Source Config",
         tag=SOURCE_CONFIG_WINDOW_TAG,
         show=False,
-        width=680,
-        height=680,
-        pos=(160, 120),
+        width=820,
+        height=820,
+        pos=(160, 80),
     ):
         dpg.add_combo(
             tag=SOURCE_SELECT_TAG,
-            label="Source",
+            label="Primary Source",
             items=list(SOURCE_NAMES_BY_LABEL),
             default_value=_source_label(controller.source_name),
-            width=260,
-            callback=lambda *_: _refresh_source_groups(controller),
+            width=280,
+            callback=lambda *_: _on_source_selection_changed(controller),
         )
         dpg.add_spacer(height=8)
 
         with dpg.group(tag=SERIAL_GROUP_TAG):
             dpg.add_text("Serial ADS1299")
             dpg.add_input_text(tag=SERIAL_PORT_INPUT_TAG, label="Port", width=260)
-            dpg.add_input_int(tag=SERIAL_BAUD_INPUT_TAG, label="Baud", width=260, min_value=1, min_clamped=True)
-            dpg.add_input_float(tag=SERIAL_TIMEOUT_INPUT_TAG, label="Timeout (s)", width=260, step=0.01)
+            dpg.add_input_int(
+                tag=SERIAL_BAUD_INPUT_TAG,
+                label="Baud",
+                width=260,
+                min_value=1,
+                min_clamped=True,
+            )
+            dpg.add_input_float(
+                tag=SERIAL_TIMEOUT_INPUT_TAG,
+                label="Timeout (s)",
+                width=260,
+                step=0.01,
+            )
 
         with dpg.group(tag=W2_GROUP_TAG):
-            dpg.add_text("W2")
-            dpg.add_combo(
-                tag=W2_TRANSPORT_INPUT_TAG,
-                label="Transport",
-                items=list(W2_TRANSPORT_NAMES),
-                width=220,
-                callback=lambda *_: _refresh_w2_connection_groups(),
-            )
-            with dpg.group(tag=W2_BLE_CONNECTION_GROUP_TAG):
-                dpg.add_input_text(tag=W2_ADDRESS_INPUT_TAG, label="Address", width=340)
-                dpg.add_input_text(tag=W2_NAME_FILTER_INPUT_TAG, label="Name Filter", width=340)
-                dpg.add_input_text(tag=W2_NOTIFY_UUID_INPUT_TAG, label="Notify UUID", width=430)
-                dpg.add_input_text(tag=W2_WRITE_UUID_INPUT_TAG, label="Write UUID", width=430)
-                dpg.add_input_float(
-                    tag=W2_SCAN_TIMEOUT_INPUT_TAG,
-                    label="Scan Timeout (s)",
-                    width=220,
-                    step=0.5,
+            dpg.add_text(f"W2 Devices (maximum {MAX_W2_DEVICES})")
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label="Add W2",
+                    width=110,
+                    callback=lambda *_: _add_w2_device(app),
                 )
-            with dpg.group(tag=W2_SERIAL_CONNECTION_GROUP_TAG):
+                dpg.add_checkbox(
+                    tag=W2_INCLUDE_BWT_TAG,
+                    label="Acquire BWT901 simultaneously",
+                    default_value=True,
+                    callback=lambda *_: _refresh_source_groups(controller),
+                )
+            with dpg.child_window(
+                tag=W2_DEVICE_LIST_TAG,
+                width=-1,
+                height=190,
+                horizontal_scrollbar=True,
+            ):
+                pass
+            with dpg.group(horizontal=True):
+                dpg.add_combo(
+                    tag=W2_MODE_INPUT_TAG,
+                    label="Mode",
+                    items=list(W2_MODE_NAMES),
+                    width=180,
+                )
+                dpg.add_input_float(
+                    tag=W2_SAMPLE_RATE_INPUT_TAG,
+                    label="Sample Rate (Hz)",
+                    width=180,
+                    step=10.0,
+                )
+            with dpg.group(horizontal=True):
                 dpg.add_input_int(
                     tag=W2_SERIAL_BAUD_INPUT_TAG,
-                    label="Baud",
-                    width=220,
+                    label="Serial Baud",
+                    width=180,
                     min_value=1,
                     min_clamped=True,
                 )
                 dpg.add_input_float(
                     tag=W2_SERIAL_TIMEOUT_INPUT_TAG,
-                    label="Timeout (s)",
-                    width=220,
+                    label="Serial Timeout (s)",
+                    width=180,
                     step=0.01,
                 )
-                dpg.add_button(
-                    label="Add Serial Channel",
-                    width=160,
-                    callback=lambda *_: _add_w2_serial_channel(app),
+                dpg.add_input_float(
+                    tag=W2_SCAN_TIMEOUT_INPUT_TAG,
+                    label="BLE Scan Timeout (s)",
+                    width=180,
+                    step=0.5,
                 )
-                with dpg.child_window(
-                    tag=W2_SERIAL_DEVICE_LIST_TAG,
-                    width=-1,
-                    height=180,
-                    horizontal_scrollbar=True,
-                ):
-                    pass
-            dpg.add_combo(tag=W2_MODE_INPUT_TAG, label="Mode", items=list(W2_MODE_NAMES), width=220)
-            dpg.add_input_float(tag=W2_SAMPLE_RATE_INPUT_TAG, label="Sample Rate (Hz)", width=220, step=10.0)
+            dpg.add_input_text(tag=W2_NOTIFY_UUID_INPUT_TAG, label="BLE Notify UUID", width=430)
+            dpg.add_input_text(tag=W2_WRITE_UUID_INPUT_TAG, label="BLE Write UUID", width=430)
+
+        with dpg.group(tag=BWT_GROUP_TAG):
+            dpg.add_separator()
+            dpg.add_text(f"BWT901BLE Devices (maximum {MAX_BWT901_DEVICES})")
+            dpg.add_button(
+                label="Add BWT901",
+                width=120,
+                callback=lambda *_: _add_bwt_device(app),
+            )
+            with dpg.child_window(
+                tag=BWT_DEVICE_LIST_TAG,
+                width=-1,
+                height=120,
+                horizontal_scrollbar=True,
+            ):
+                pass
+            dpg.add_input_float(
+                tag=BWT_SCAN_TIMEOUT_INPUT_TAG,
+                label="BLE Scan Timeout (s)",
+                width=220,
+                step=0.5,
+            )
 
         with dpg.group(tag=MYO_GROUP_TAG):
             dpg.add_text("Myo Armband BLE")
@@ -186,11 +236,17 @@ def _build_window(app: FundamentalApp, controller: AcquisitionController) -> Non
             width=120,
             callback=lambda *_: _apply_from_window(app, controller),
         )
-        dpg.add_spacer(height=8)
         dpg.add_text("", tag=SUMMARY_TEXT_TAG)
-        dpg.add_spacer(height=8)
+        dpg.add_text("Device Health")
+        with dpg.child_window(tag=HEALTH_LIST_TAG, width=-1, height=100):
+            pass
         dpg.add_text("Data Inspection")
-        with dpg.child_window(tag=INSPECTION_LIST_TAG, width=-1, height=150, horizontal_scrollbar=True):
+        with dpg.child_window(
+            tag=INSPECTION_LIST_TAG,
+            width=-1,
+            height=130,
+            horizontal_scrollbar=True,
+        ):
             pass
 
     _sync_window(controller)
@@ -198,8 +254,8 @@ def _build_window(app: FundamentalApp, controller: AcquisitionController) -> Non
 
 def _apply_from_window(app: FundamentalApp, controller: AcquisitionController) -> None:
     source_name = _selected_source_name(controller)
-    if source_name != controller.source_name and controller.state != AcquisitionState.STOPPED:
-        app.log(controller.select_source(source_name) or "Source unchanged.")
+    if controller.state != AcquisitionState.STOPPED:
+        app.log("Stop acquisition before changing source configuration.")
         _sync_window(controller)
         return
 
@@ -209,11 +265,10 @@ def _apply_from_window(app: FundamentalApp, controller: AcquisitionController) -
             baud_rate=int(dpg.get_value(SERIAL_BAUD_INPUT_TAG)),
             timeout_s=float(dpg.get_value(SERIAL_TIMEOUT_INPUT_TAG)),
         )
+        active = (SerialADS1299Source.name,)
     elif source_name == BLEW2Source.name:
         error = controller.update_w2_config(
-            transport=str(dpg.get_value(W2_TRANSPORT_INPUT_TAG)).strip(),
-            address=str(dpg.get_value(W2_ADDRESS_INPUT_TAG)).strip(),
-            device_name_filter=str(dpg.get_value(W2_NAME_FILTER_INPUT_TAG)).strip(),
+            devices=_w2_devices_from_window(),
             notify_uuid=str(dpg.get_value(W2_NOTIFY_UUID_INPUT_TAG)).strip(),
             write_uuid=str(dpg.get_value(W2_WRITE_UUID_INPUT_TAG)).strip(),
             mode=str(dpg.get_value(W2_MODE_INPUT_TAG)).strip(),
@@ -221,8 +276,18 @@ def _apply_from_window(app: FundamentalApp, controller: AcquisitionController) -
             scan_timeout_s=float(dpg.get_value(W2_SCAN_TIMEOUT_INPUT_TAG)),
             serial_baud_rate=int(dpg.get_value(W2_SERIAL_BAUD_INPUT_TAG)),
             serial_timeout_s=float(dpg.get_value(W2_SERIAL_TIMEOUT_INPUT_TAG)),
-            serial_devices=_w2_serial_devices_from_window(),
         )
+        include_bwt = bool(dpg.get_value(W2_INCLUDE_BWT_TAG))
+        if error is None and include_bwt:
+            error = _apply_bwt_config(controller)
+        active = (
+            (BLEW2Source.name, BWT901Source.name)
+            if include_bwt
+            else (BLEW2Source.name,)
+        )
+    elif source_name == BWT901Source.name:
+        error = _apply_bwt_config(controller)
+        active = (BWT901Source.name,)
     else:
         error = controller.update_myo_config(
             address=str(dpg.get_value(MYO_ADDRESS_INPUT_TAG)).strip(),
@@ -232,151 +297,280 @@ def _apply_from_window(app: FundamentalApp, controller: AcquisitionController) -
             enable_emg=bool(dpg.get_value(MYO_ENABLE_EMG_TAG)),
             enable_imu=bool(dpg.get_value(MYO_ENABLE_IMU_TAG)),
         )
+        active = (MyoSource.name,)
 
+    if error is None:
+        error = controller.select_sources(active)
     if error:
         app.log(error)
         _sync_window(controller)
         return
-
-    error = controller.select_source(source_name)
-    if error:
-        app.log(error)
-    else:
-        app.log(f"Acquisition source updated: {controller.source_display_text()}.")
+    app.log(f"Acquisition sources updated: {controller.source_display_text()}.")
     _sync_window(controller)
+
+
+def _apply_bwt_config(controller: AcquisitionController) -> str | None:
+    return controller.update_bwt901_config(
+        devices=_bwt_devices_from_window(),
+        scan_timeout_s=float(dpg.get_value(BWT_SCAN_TIMEOUT_INPUT_TAG)),
+    )
 
 
 def _sync_window(controller: AcquisitionController) -> None:
     if not dpg.does_item_exist(SOURCE_CONFIG_WINDOW_TAG):
         return
-
     dpg.set_value(SOURCE_SELECT_TAG, _source_label(controller.source_name))
-
     serial_config = controller.config
     dpg.set_value(SERIAL_PORT_INPUT_TAG, serial_config.port)
     dpg.set_value(SERIAL_BAUD_INPUT_TAG, serial_config.baud_rate)
     dpg.set_value(SERIAL_TIMEOUT_INPUT_TAG, serial_config.timeout_s)
 
-    w2_config = controller.w2_config
-    dpg.set_value(W2_TRANSPORT_INPUT_TAG, w2_config.transport)
-    dpg.set_value(W2_ADDRESS_INPUT_TAG, w2_config.address)
-    dpg.set_value(W2_NAME_FILTER_INPUT_TAG, w2_config.device_name_filter)
-    dpg.set_value(W2_NOTIFY_UUID_INPUT_TAG, w2_config.notify_uuid)
-    dpg.set_value(W2_WRITE_UUID_INPUT_TAG, w2_config.write_uuid)
-    dpg.set_value(W2_MODE_INPUT_TAG, w2_config.mode)
-    dpg.set_value(W2_SAMPLE_RATE_INPUT_TAG, w2_config.sample_rate_hz)
-    dpg.set_value(W2_SCAN_TIMEOUT_INPUT_TAG, w2_config.scan_timeout_s)
-    dpg.set_value(W2_SERIAL_BAUD_INPUT_TAG, w2_config.serial_baud_rate)
-    dpg.set_value(W2_SERIAL_TIMEOUT_INPUT_TAG, w2_config.serial_timeout_s)
-    _set_w2_serial_devices(w2_config.serial_devices)
+    w2 = controller.w2_config
+    dpg.set_value(W2_NOTIFY_UUID_INPUT_TAG, w2.notify_uuid)
+    dpg.set_value(W2_WRITE_UUID_INPUT_TAG, w2.write_uuid)
+    dpg.set_value(W2_MODE_INPUT_TAG, w2.mode)
+    dpg.set_value(W2_SAMPLE_RATE_INPUT_TAG, w2.sample_rate_hz)
+    dpg.set_value(W2_SCAN_TIMEOUT_INPUT_TAG, w2.scan_timeout_s)
+    dpg.set_value(W2_SERIAL_BAUD_INPUT_TAG, w2.serial_baud_rate)
+    dpg.set_value(W2_SERIAL_TIMEOUT_INPUT_TAG, w2.serial_timeout_s)
+    dpg.set_value(W2_INCLUDE_BWT_TAG, BWT901Source.name in controller.active_source_names)
+    _set_w2_devices(w2.effective_devices())
 
-    myo_config = controller.myo_config
-    dpg.set_value(MYO_ADDRESS_INPUT_TAG, myo_config.address)
-    dpg.set_value(MYO_NAME_FILTER_INPUT_TAG, myo_config.device_name_filter)
-    dpg.set_value(MYO_SCAN_TIMEOUT_INPUT_TAG, myo_config.scan_timeout_s)
-    dpg.set_value(MYO_CONNECT_TIMEOUT_INPUT_TAG, myo_config.connect_timeout_s)
-    dpg.set_value(MYO_ENABLE_EMG_TAG, myo_config.enable_emg)
-    dpg.set_value(MYO_ENABLE_IMU_TAG, myo_config.enable_imu)
+    bwt = controller.bwt901_config
+    dpg.set_value(BWT_SCAN_TIMEOUT_INPUT_TAG, bwt.scan_timeout_s)
+    _set_bwt_devices(bwt.devices)
+
+    myo = controller.myo_config
+    dpg.set_value(MYO_ADDRESS_INPUT_TAG, myo.address)
+    dpg.set_value(MYO_NAME_FILTER_INPUT_TAG, myo.device_name_filter)
+    dpg.set_value(MYO_SCAN_TIMEOUT_INPUT_TAG, myo.scan_timeout_s)
+    dpg.set_value(MYO_CONNECT_TIMEOUT_INPUT_TAG, myo.connect_timeout_s)
+    dpg.set_value(MYO_ENABLE_EMG_TAG, myo.enable_emg)
+    dpg.set_value(MYO_ENABLE_IMU_TAG, myo.enable_imu)
 
     dpg.set_value(SUMMARY_TEXT_TAG, f"Active: {controller.source_display_text()}")
     _refresh_source_groups(controller)
+    _refresh_health(controller)
 
 
 def _refresh_source_groups(controller: AcquisitionController) -> None:
     selected = _selected_source_name(controller)
+    show_w2 = selected == BLEW2Source.name
+    show_bwt = selected == BWT901Source.name or (
+        show_w2
+        and dpg.does_item_exist(W2_INCLUDE_BWT_TAG)
+        and bool(dpg.get_value(W2_INCLUDE_BWT_TAG))
+    )
     _configure_if_exists(SERIAL_GROUP_TAG, show=selected == SerialADS1299Source.name)
-    _configure_if_exists(W2_GROUP_TAG, show=selected == BLEW2Source.name)
+    _configure_if_exists(W2_GROUP_TAG, show=show_w2)
+    _configure_if_exists(BWT_GROUP_TAG, show=show_bwt)
     _configure_if_exists(MYO_GROUP_TAG, show=selected == MyoSource.name)
-    _refresh_w2_connection_groups()
     _refresh_inspection(controller)
 
 
-def _refresh_w2_connection_groups() -> None:
-    if not dpg.does_item_exist(W2_TRANSPORT_INPUT_TAG):
-        return
-    transport = str(dpg.get_value(W2_TRANSPORT_INPUT_TAG)).strip()
-    _configure_if_exists(W2_BLE_CONNECTION_GROUP_TAG, show=transport == "ble")
-    _configure_if_exists(W2_SERIAL_CONNECTION_GROUP_TAG, show=transport == "serial")
+def _on_source_selection_changed(controller: AcquisitionController) -> None:
+    if (
+        _selected_source_name(controller) == BLEW2Source.name
+        and controller.source_name != BLEW2Source.name
+        and dpg.does_item_exist(W2_INCLUDE_BWT_TAG)
+    ):
+        dpg.set_value(W2_INCLUDE_BWT_TAG, True)
+    _refresh_source_groups(controller)
 
 
-def _w2_serial_field_tag(index: int, field_name: str) -> str:
-    return f"fundamental.source_config.w2_serial.{index}.{field_name}"
+def _w2_field_tag(index: int, field_name: str) -> str:
+    return f"fundamental.source_config.w2.{index}.{field_name}"
 
 
-def _w2_serial_devices_from_window() -> tuple[W2SerialDeviceConfig, ...]:
-    devices: list[W2SerialDeviceConfig] = []
-    for index in range(_w2_serial_editor_row_count):
-        channel_tag = _w2_serial_field_tag(index, "channel_id")
-        if not dpg.does_item_exist(channel_tag):
+def _w2_devices_from_window() -> tuple[W2DeviceConfig, ...]:
+    devices: list[W2DeviceConfig] = []
+    for index in range(_w2_editor_row_count):
+        id_tag = _w2_field_tag(index, "device_id")
+        if not dpg.does_item_exist(id_tag):
             continue
         devices.append(
-            W2SerialDeviceConfig(
-                channel_id=str(dpg.get_value(channel_tag)).strip(),
-                port=str(dpg.get_value(_w2_serial_field_tag(index, "port"))).strip(),
+            W2DeviceConfig(
+                device_id=str(dpg.get_value(id_tag)).strip(),
+                transport=cast(str, dpg.get_value(_w2_field_tag(index, "transport"))),
+                port=str(dpg.get_value(_w2_field_tag(index, "port"))).strip(),
+                address=str(dpg.get_value(_w2_field_tag(index, "address"))).strip(),
+                device_name_filter=str(
+                    dpg.get_value(_w2_field_tag(index, "name_filter"))
+                ).strip(),
             ).normalized()
         )
     return tuple(devices)
 
 
-def _set_w2_serial_devices(devices: tuple[W2SerialDeviceConfig, ...]) -> None:
-    global _w2_serial_editor_row_count
-    if not dpg.does_item_exist(W2_SERIAL_DEVICE_LIST_TAG):
+def _set_w2_devices(devices: tuple[W2DeviceConfig, ...]) -> None:
+    global _w2_editor_row_count
+    if not dpg.does_item_exist(W2_DEVICE_LIST_TAG):
         return
-
     normalized = tuple(device.normalized() for device in devices)
-    dpg.delete_item(W2_SERIAL_DEVICE_LIST_TAG, children_only=True)
-    _w2_serial_editor_row_count = len(normalized)
+    dpg.delete_item(W2_DEVICE_LIST_TAG, children_only=True)
+    _w2_editor_row_count = len(normalized)
     for index, device in enumerate(normalized):
-        with dpg.group(horizontal=True, parent=W2_SERIAL_DEVICE_LIST_TAG):
+        with dpg.group(horizontal=True, parent=W2_DEVICE_LIST_TAG):
             dpg.add_input_text(
-                tag=_w2_serial_field_tag(index, "channel_id"),
-                label="Channel",
-                default_value=device.channel_id,
-                width=100,
+                tag=_w2_field_tag(index, "device_id"),
+                label="ID",
+                default_value=device.device_id,
+                width=90,
+            )
+            dpg.add_combo(
+                tag=_w2_field_tag(index, "transport"),
+                label="Interface",
+                items=list(W2_TRANSPORT_NAMES),
+                default_value=device.transport,
+                width=90,
             )
             dpg.add_input_text(
-                tag=_w2_serial_field_tag(index, "port"),
+                tag=_w2_field_tag(index, "port"),
                 label="Port",
                 default_value=device.port,
-                width=90,
+                width=80,
+            )
+            dpg.add_input_text(
+                tag=_w2_field_tag(index, "address"),
+                label="BLE Address",
+                default_value=device.address,
+                width=145,
+            )
+            dpg.add_input_text(
+                tag=_w2_field_tag(index, "name_filter"),
+                label="Name",
+                default_value=device.device_name_filter,
+                width=100,
             )
             dpg.add_button(
                 label="Remove",
                 user_data=index,
-                callback=lambda _sender, _app_data, user_data: _remove_w2_serial_channel(
-                    int(user_data)
-                ),
+                callback=lambda _s, _a, row: _remove_w2_device(int(row)),
             )
 
 
-def _add_w2_serial_channel(app: FundamentalApp) -> None:
-    devices = list(_w2_serial_devices_from_window())
-    used_ids = {device.channel_id.casefold() for device in devices}
-    next_index = 1
-    while f"ch{next_index}".casefold() in used_ids:
-        next_index += 1
-    devices.append(W2SerialDeviceConfig(channel_id=f"ch{next_index}", port=""))
-    _set_w2_serial_devices(tuple(devices))
-    app.log(f"Added W2 serial channel ch{next_index}; select its Port before applying.")
-
-
-def _remove_w2_serial_channel(index: int) -> None:
-    devices = list(_w2_serial_devices_from_window())
-    if not 0 <= index < len(devices):
+def _add_w2_device(app: FundamentalApp) -> None:
+    devices = list(_w2_devices_from_window())
+    if len(devices) >= MAX_W2_DEVICES:
+        app.log(f"At most {MAX_W2_DEVICES} W2 devices can be configured.")
         return
-    del devices[index]
-    _set_w2_serial_devices(tuple(devices))
+    used = {device.device_id.casefold() for device in devices}
+    index = 1
+    while f"w2_{index}".casefold() in used:
+        index += 1
+    device_id = f"w2_{index}"
+    devices.append(W2DeviceConfig(device_id=device_id, port=""))
+    _set_w2_devices(tuple(devices))
+    app.log(f"Added {device_id}; select its interface and connection target.")
+
+
+def _remove_w2_device(index: int) -> None:
+    devices = list(_w2_devices_from_window())
+    if 0 <= index < len(devices):
+        del devices[index]
+        _set_w2_devices(tuple(devices))
+
+
+def _bwt_field_tag(index: int, field_name: str) -> str:
+    return f"fundamental.source_config.bwt.{index}.{field_name}"
+
+
+def _bwt_devices_from_window() -> tuple[BWT901DeviceConfig, ...]:
+    devices: list[BWT901DeviceConfig] = []
+    for index in range(_bwt_editor_row_count):
+        id_tag = _bwt_field_tag(index, "device_id")
+        if not dpg.does_item_exist(id_tag):
+            continue
+        devices.append(
+            BWT901DeviceConfig(
+                device_id=str(dpg.get_value(id_tag)).strip(),
+                address=str(dpg.get_value(_bwt_field_tag(index, "address"))).strip(),
+                name_filter=str(dpg.get_value(_bwt_field_tag(index, "name_filter"))).strip(),
+            ).normalized()
+        )
+    return tuple(devices)
+
+
+def _set_bwt_devices(devices: tuple[BWT901DeviceConfig, ...]) -> None:
+    global _bwt_editor_row_count
+    if not dpg.does_item_exist(BWT_DEVICE_LIST_TAG):
+        return
+    normalized = tuple(device.normalized() for device in devices)
+    dpg.delete_item(BWT_DEVICE_LIST_TAG, children_only=True)
+    _bwt_editor_row_count = len(normalized)
+    for index, device in enumerate(normalized):
+        with dpg.group(horizontal=True, parent=BWT_DEVICE_LIST_TAG):
+            dpg.add_input_text(
+                tag=_bwt_field_tag(index, "device_id"),
+                label="ID",
+                default_value=device.device_id,
+                width=100,
+            )
+            dpg.add_input_text(
+                tag=_bwt_field_tag(index, "address"),
+                label="BLE Address",
+                default_value=device.address,
+                width=180,
+            )
+            dpg.add_input_text(
+                tag=_bwt_field_tag(index, "name_filter"),
+                label="Name",
+                default_value=device.name_filter,
+                width=100,
+            )
+            dpg.add_button(
+                label="Remove",
+                user_data=index,
+                callback=lambda _s, _a, row: _remove_bwt_device(int(row)),
+            )
+
+
+def _add_bwt_device(app: FundamentalApp) -> None:
+    devices = list(_bwt_devices_from_window())
+    if len(devices) >= MAX_BWT901_DEVICES:
+        app.log(f"At most {MAX_BWT901_DEVICES} BWT901 devices can be configured.")
+        return
+    used = {device.device_id.casefold() for device in devices}
+    index = 1
+    while f"imu_{index}".casefold() in used:
+        index += 1
+    device_id = f"imu_{index}"
+    devices.append(BWT901DeviceConfig(device_id=device_id, address=""))
+    _set_bwt_devices(tuple(devices))
+    app.log(f"Added {device_id}; enter its BLE address before applying.")
+
+
+def _remove_bwt_device(index: int) -> None:
+    devices = list(_bwt_devices_from_window())
+    if 0 <= index < len(devices):
+        del devices[index]
+        _set_bwt_devices(tuple(devices))
+
+
+def _refresh_health(controller: AcquisitionController) -> None:
+    if not dpg.does_item_exist(HEALTH_LIST_TAG):
+        return
+    dpg.delete_item(HEALTH_LIST_TAG, children_only=True)
+    lines = controller.health_lines() or ("No device status yet.",)
+    for line in lines:
+        dpg.add_text(line, parent=HEALTH_LIST_TAG)
 
 
 def _refresh_inspection(controller: AcquisitionController) -> None:
     if not dpg.does_item_exist(INSPECTION_LIST_TAG):
         return
-
     selected = _selected_source_name(controller)
-    source = controller.configured_source(selected)
+    names: tuple[SourceName, ...] = (selected,)
+    if (
+        selected == BLEW2Source.name
+        and dpg.does_item_exist(W2_INCLUDE_BWT_TAG)
+        and bool(dpg.get_value(W2_INCLUDE_BWT_TAG))
+    ):
+        names = (BLEW2Source.name, BWT901Source.name)
     dpg.delete_item(INSPECTION_LIST_TAG, children_only=True)
-    for line in source.inspect_data():
-        dpg.add_text(line, parent=INSPECTION_LIST_TAG)
+    for name in names:
+        for line in controller.configured_source(name).inspect_data():
+            dpg.add_text(line, parent=INSPECTION_LIST_TAG)
 
 
 def _selected_source_name(controller: AcquisitionController) -> SourceName:

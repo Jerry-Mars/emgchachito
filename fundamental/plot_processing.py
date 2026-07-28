@@ -100,6 +100,20 @@ def signal_stats(values: list[float]) -> SignalStats:
     return SignalStats(peak, rms)
 
 
+def format_signal_status(values: list[float], signal_kind: str, unit: str) -> str:
+    """Format EMG energy statistics or direct-value statistics for other signals."""
+
+    if not values:
+        return "No samples."
+    if signal_kind == "emg":
+        stats = signal_stats(values)
+        return f"Peak {stats.peak:.3f} {unit} | RMS {stats.rms:.3f}"
+    return (
+        f"Current {values[-1]:.3f} {unit} | "
+        f"Min {min(values):.3f} {unit} | Max {max(values):.3f} {unit}"
+    )
+
+
 class AxisScaler:
     """Smooth y-axis limits for one plot slot."""
 

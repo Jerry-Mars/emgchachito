@@ -9,13 +9,19 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fundamental.streams import FieldSpec, StreamSnapshot
 
 
-def default_capture_path() -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return Path("captures") / f"capture_{timestamp}.csv"
+def default_capture_path(*, create_directory: bool = False) -> Path:
+    """Return one capture path inside a uniquely named experiment directory."""
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    experiment_dir = Path("captures") / f"experiment_{timestamp}_{uuid4().hex[:6]}"
+    if create_directory:
+        experiment_dir.mkdir(parents=True, exist_ok=False)
+    return experiment_dir / "capture.csv"
 
 
 StimulusCodeResolver = Callable[[float], int]

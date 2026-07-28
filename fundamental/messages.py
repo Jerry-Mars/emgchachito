@@ -18,6 +18,7 @@ class AcquisitionState(Enum):
     """Minimal acquisition lifecycle."""
 
     STOPPED = "stopped"
+    STARTING = "starting"
     RUNNING = "running"
     PAUSED = "paused"
 
@@ -45,6 +46,7 @@ class SerialConfig:
 class WorkerEvent:
     """Status or failure event emitted by a worker."""
 
-    kind: Literal["log", "error", "metadata"]
+    kind: Literal["log", "error", "metadata", "ready", "health"]
     message: str = ""
     data: Mapping[str, Any] | None = None
+    source_id: str = ""

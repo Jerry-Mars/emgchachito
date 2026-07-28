@@ -28,6 +28,7 @@ class RecordingSession:
         self.acquisition = acquisition
         self.stimulus = stimulus
         self._stimulus_enabled_for_capture = False
+        self._pending_stimulus_start = False
 
     @property
     def has_stimulus_labels(self) -> bool:
@@ -36,11 +37,25 @@ class RecordingSession:
     def on_frame(self, log_sink: LogSink | None = None) -> int:
         """Drain acquisition data and keep stimulus state aligned to sample time."""
 
-        was_acquisition_running = self.acquisition.state == AcquisitionState.RUNNING
+        was_acquisition_active = self.acquisition.state in (
+            AcquisitionState.STARTING,
+            AcquisitionState.RUNNING,
+            AcquisitionState.PAUSED,
+        )
         was_stimulus_running = self.stimulus.state == StimulusState.RUNNING
         was_stimulus_active = self._is_stimulus_active()
 
         appended = self.acquisition.drain_queues(log_sink)
+        if self._pending_stimulus_start:
+            if self.acquisition.state == AcquisitionState.RUNNING:
+                self._pending_stimulus_start = False
+                self._log(
+                    log_sink,
+                    self.stimulus.start(self.acquisition.buffer.latest_time_s),
+                )
+            elif self.acquisition.state == AcquisitionState.STOPPED:
+                self._pending_stimulus_start = False
+                self._stimulus_enabled_for_capture = False
         if self._stimulus_enabled_for_capture:
             self.stimulus.update(self.acquisition.buffer.latest_time_s)
 
@@ -52,7 +67,7 @@ class RecordingSession:
             self._log(log_sink, self.acquisition.stop())
             self._log(log_sink, "Stimulus schedule completed.")
         elif (
-            was_acquisition_running
+            was_acquisition_active
             and self.acquisition.state == AcquisitionState.STOPPED
             and was_stimulus_active
             and self._is_stimulus_active()
@@ -67,6 +82,7 @@ class RecordingSession:
             if self._is_stimulus_active():
                 self.stimulus.stop(self.acquisition.buffer.latest_time_s)
             self._stimulus_enabled_for_capture = False
+            self._pending_stimulus_start = False
             self.stimulus.reset_timeline()
         return self.acquisition.start()
 
@@ -75,7 +91,13 @@ class RecordingSession:
         if self.acquisition.state != AcquisitionState.RUNNING:
             messages.append(self.acquisition.start())
         self._stimulus_enabled_for_capture = True
-        messages.append(self.stimulus.start(self.acquisition.buffer.latest_time_s))
+        if self.acquisition.state == AcquisitionState.STARTING:
+            self._pending_stimulus_start = True
+            messages.append("Stimulus will start after all acquisition devices are ready.")
+        elif self.acquisition.state == AcquisitionState.RUNNING:
+            messages.append(self.stimulus.start(self.acquisition.buffer.latest_time_s))
+        else:
+            self._stimulus_enabled_for_capture = False
         return messages
 
     def pause(self) -> list[str]:
@@ -91,6 +113,7 @@ class RecordingSession:
         return messages
 
     def stop(self) -> list[str]:
+        self._pending_stimulus_start = False
         messages = [self.acquisition.stop()]
         if self._stimulus_enabled_for_capture and self._is_stimulus_active():
             messages.append(self.stimulus.stop(self.acquisition.buffer.latest_time_s))

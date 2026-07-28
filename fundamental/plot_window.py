@@ -15,9 +15,9 @@ from fundamental.messages import DEFAULT_PLOT_WINDOW_SECONDS
 from fundamental.plot_processing import (
     SCALE_MODE_OPTIONS,
     AxisScaler,
+    format_signal_status,
     minmax_downsample,
     process_signal,
-    signal_stats,
 )
 from fundamental.window_manager import ManagedWindow
 
@@ -186,8 +186,11 @@ class PlotSlot:
         dpg.set_axis_limits(self.y_axis_tag, low, high)
         dpg.set_item_label(self.y_axis_tag, processed.unit)
 
-        stats = signal_stats(processed.values)
-        status = f"Peak {stats.peak:.3f} {processed.unit} | RMS {stats.rms:.3f}"
+        status = format_signal_status(
+            processed.values,
+            series_window.spec.signal_kind,
+            processed.unit,
+        )
         if outside:
             status = f"{status} | Axis Out {outside}"
         dpg.set_value(self.status_tag, status)

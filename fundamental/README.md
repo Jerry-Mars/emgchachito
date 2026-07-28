@@ -37,8 +37,8 @@ Acquisition controls are kept inside the acquisition window and call the shared
 recording session:
 
 - `Start`: start or resume acquisition.
-- `Pause`: pause acquisition, and pause stimulus too when this capture has a
-  stimulus timeline.
+- `Pause`: pause acquisition without closing managed W2/BWT connections, and
+  pause stimulus too when this capture has a stimulus timeline.
 - `Stop`: stop acquisition, and close any active stimulus event at the latest
   sample time.
 - `Save`: save buffered samples while paused or stopped. If the current capture
@@ -91,25 +91,33 @@ The current shared services are:
 
 ## Acquisition Sources
 
-The acquisition controller owns the selected source and blocks source switching
-unless acquisition is stopped. Current sources:
+The acquisition controller owns the selected source set and blocks source
+changes unless acquisition is stopped. Current sources:
 
 - `serial_ads1299`: serial ADS1299 worker using
   `DeviceInterface/ads1299_protocol.py` (accepts both the current 35-byte frame
   and the legacy 34-byte frame).
-- `ble_w2`: W2 source using `DeviceInterface/w2_protocol.py`; it can connect
-  over BLE or acquire one or more W2 units through independent serial ports.
+- `ble_w2`: up to five W2 devices using the unchanged
+  `DeviceInterface/w2_protocol.py`; every device independently selects Serial
+  or BLE while sharing the same protocol mode and rate.
+- `bwt901_ble`: up to two BWT901BLE IMUs using the verified FFE5/FFE4/FFE9
+  configuration and `DeviceInterface/bwt901_protocol.py`.
 - `ble_myo`: Myo armband worker using `pymyo` over `bleak`; it can acquire raw
   8-channel EMG, IMU, or both.
 
-W2 defaults to scanning for an advertised name containing `RunE W2`. Selecting
-the W2 serial transport exposes a channel list; each channel has its own unique
-ID and Port and defaults to `25600 8N1` with a `0.05 s` timeout. All configured
-W2 serial channels start, pause, stop, and save as one acquisition source while
-publishing independent streams. Myo defaults to the Myo control-service UUID
-and an advertised name containing `Myo`. Enter an address only when
-intentionally pinning acquisition to one known unit; demo addresses are
-device-specific.
+The current W2 experiment default is four serial devices on `COM9`, `COM11`,
+`COM12`, and `COM13` at `256000 8N1` with a `0.05 s` timeout. Device rows may
+instead use an explicit BLE address. Multiple BLE rows require unique addresses.
+The first BWT901 row uses
+the verified demo address `CF:B6:E0:FC:2F:98`; a second row remains optional and
+also requires its own address. W2 and BWT901 can be enabled together. They all
+connect before the shared capture gate opens; a required-device failure stops
+the full set.
+
+Pause keeps Serial/BLE handles open. W2 receives its stop command while paused;
+BWT901 notifications remain subscribed but decoded samples are not appended.
+Resume reuses the same connections, and Stop performs the actual disconnect.
+Myo keeps its existing single-source behavior.
 
 The `source` command opens the shared source window. Its data inspection block
 shows the selected source's worker, transport/parser, and declared stream
@@ -126,8 +134,9 @@ All production sources publish the same small contract:
 - `CaptureStore` retains full rows for saving and bounded per-series windows for
   live consumers.
 
-ADS1299, W2, and Myo source modules own their protocol-specific parsing. Plotting
-and CSV persistence consume only the schema and store interfaces. A future
+ADS1299, W2, BWT901, and Myo source modules own their protocol-specific parsing.
+Serial/BLE byte transport is separate from the W2/BWT901 decoder. Plotting and
+CSV persistence consume only the schema and store interfaces. A future
 sensor can therefore add fields or streams without adding device branches to
 the plot or writer. A future 3D IMU view can query quaternion/IMU series from the
 same store without depending on BLE code.
@@ -174,6 +183,15 @@ CSV headers come directly from each `StreamSpec`: metadata fields first,
 optional `stimulus_code`, then signal fields. The writer has no device-specific
 header branches. One populated stream produces one CSV; multiple independent
 streams produce one raw CSV per stream plus one shared metadata sidecar.
+Every new capture receives its own directory under `captures/`, for example:
+
+```text
+captures/experiment_YYYYMMDD_HHMMSS_mmm_xxxxxx/
+  capture.ble_w2_w2_1_signal.csv
+  capture.bwt901_imu_1_imu.csv
+  capture.metadata.json
+  capture.stimulus.csv
+```
 
 ## Serial Protocol
 

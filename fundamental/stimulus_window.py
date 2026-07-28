@@ -336,14 +336,21 @@ def _refresh_window(acquisition: AcquisitionController, stimulus: StimulusContro
     running = stimulus.state == StimulusState.RUNNING
     paused = stimulus.state == StimulusState.PAUSED
     acquisition_running = acquisition.state == AcquisitionState.RUNNING
-    _configure_if_exists(START_BUTTON_TAG, enabled=not running and not paused)
+    acquisition_starting = acquisition.state == AcquisitionState.STARTING
+    _configure_if_exists(
+        START_BUTTON_TAG,
+        enabled=not running and not paused and not acquisition_starting,
+    )
     _configure_if_exists(PAUSE_BUTTON_TAG, enabled=running)
     _configure_if_exists(RESUME_BUTTON_TAG, enabled=paused)
-    _configure_if_exists(STOP_BUTTON_TAG, enabled=running or paused or acquisition_running)
+    _configure_if_exists(
+        STOP_BUTTON_TAG,
+        enabled=running or paused or acquisition_running or acquisition_starting,
+    )
     _configure_if_exists(RESTART_BUTTON_TAG, enabled=running)
     _configure_if_exists(
         SAVE_BUTTON_TAG,
-        enabled=not acquisition_running and acquisition.buffer.row_count > 0,
+        enabled=not acquisition_running and not acquisition_starting and acquisition.buffer.row_count > 0,
     )
 
 
