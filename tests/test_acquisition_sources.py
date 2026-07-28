@@ -122,6 +122,21 @@ class FakeManagedSource:
         return self.worker
 
 
+class FakeCaptureClock:
+    def __init__(self, value: float) -> None:
+        self.value = value
+        self.running = True
+
+    def now(self) -> float:
+        return self.value
+
+    def pause(self) -> None:
+        self.running = False
+
+    def resume(self) -> None:
+        self.running = True
+
+
 class AcquisitionSourceTests(unittest.TestCase):
     def test_controller_starts_worker_from_active_source(self) -> None:
         controller = AcquisitionController()
@@ -342,6 +357,28 @@ class AcquisitionSourceTests(unittest.TestCase):
         self.assertEqual(controller.state, AcquisitionState.STOPPED)
         self.assertTrue(all(not worker.is_alive() for worker in first_workers))
         self.assertTrue(Path(controller.last_save_path).parent.name.startswith("experiment_"))
+
+    def test_managed_timeline_freezes_on_pause_and_remains_available_after_stop(self) -> None:
+        controller = AcquisitionController()
+        controller.select_source(BLEW2Source.name)
+        source = FakeManagedSource(BLEW2Source.name, "fake.w2")
+        controller.w2_source = source  # type: ignore[assignment]
+        controller.start()
+        controller.drain_queues()
+        assert controller.control is not None
+        clock = FakeCaptureClock(2.5)
+        controller.control.clock = clock  # type: ignore[assignment]
+
+        controller.pause()
+        self.assertEqual(controller.timeline_time_s, 2.5)
+        self.assertFalse(clock.running)
+        clock.value = 4.0
+        controller.start()
+        self.assertTrue(clock.running)
+        controller.stop()
+
+        self.assertEqual(controller.timeline_time_s, 4.0)
+        self.assertIsNone(controller.control)
 
     def test_managed_source_error_stops_every_source(self) -> None:
         controller = AcquisitionController()

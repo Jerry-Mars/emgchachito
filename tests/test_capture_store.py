@@ -7,7 +7,7 @@ from contextlib import chdir
 from pathlib import Path
 
 from fundamental.capture_store import CaptureStore
-from fundamental.csv_writer import default_capture_path, save_capture
+from fundamental.csv_writer import default_capture_path, save_capture, save_stimulus_log
 from fundamental.sources.ble_w2 import BLEW2Source, W2BLEConfig, W2DeviceConfig
 from fundamental.sources.bwt901 import BWT901BLEConfig, BWT901DeviceConfig, BWT901Source
 from fundamental.sources.myo import MYO_EMG_STREAM_SPEC, MYO_IMU_STREAM_SPEC
@@ -61,7 +61,11 @@ class CaptureStoreTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             experiment = Path(tmp) / "experiment_test"
-            result = save_capture(experiment / "capture.csv", store.snapshots())
+            result = save_capture(
+                experiment / "capture.csv",
+                store.snapshots(),
+                stimulus_code_for_sample=lambda _stream_id, _row_index, _time_s: 3,
+            )
             names = {stream.path.name for stream in result.streams}
             self.assertEqual(
                 names,
@@ -72,8 +76,15 @@ class CaptureStoreTests(unittest.TestCase):
             )
             self.assertEqual(
                 imu_path.read_text(encoding="utf-8").splitlines()[0],
-                "time_s,sequence,acc_x_g,acc_y_g,acc_z_g,gyro_x_dps,gyro_y_dps,"
+                "time_s,sequence,stimulus_code,acc_x_g,acc_y_g,acc_z_g,gyro_x_dps,gyro_y_dps,"
                 "gyro_z_dps,angle_x_deg,angle_y_deg,angle_z_deg",
+            )
+            w2_path = next(
+                stream.path for stream in result.streams if stream.stream_id.startswith("ble_w2")
+            )
+            self.assertEqual(
+                w2_path.read_text(encoding="utf-8").splitlines()[0],
+                "time_s,stimulus_code,value",
             )
 
     def test_streams_keep_independent_rates_and_series_windows(self) -> None:
@@ -156,6 +167,104 @@ class CaptureStoreTests(unittest.TestCase):
             metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(metadata["source"], "ble_myo")
             self.assertEqual({stream["stream_id"] for stream in metadata["streams"]}, {"myo.emg", "myo.imu"})
+
+    def test_sample_stimulus_resolver_uses_each_stream_row_boundary(self) -> None:
+        store = CaptureStore(stream_specs=(MYO_EMG_STREAM_SPEC, MYO_IMU_STREAM_SPEC))
+        store.append_block(
+            StreamBlock(
+                MYO_EMG_STREAM_SPEC,
+                (0.0, 0.1, 0.2),
+                (
+                    (0.0, 1, 2, 3, 4, 5, 6, 7, 8),
+                    (0.1, 1, 2, 3, 4, 5, 6, 7, 8),
+                    (0.2, 1, 2, 3, 4, 5, 6, 7, 8),
+                ),
+            )
+        )
+        store.append_block(
+            StreamBlock(
+                MYO_IMU_STREAM_SPEC,
+                (0.0, 0.1, 0.2),
+                (
+                    (0.0, 1.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.3, 1.0, 2.0, 3.0),
+                    (0.1, 1.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.3, 1.0, 2.0, 3.0),
+                    (0.2, 1.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.3, 1.0, 2.0, 3.0),
+                ),
+            )
+        )
+        boundaries = {"myo.emg": 2, "myo.imu": 1}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = save_capture(
+                Path(tmp) / "capture.csv",
+                store.snapshots(),
+                stimulus_code_for_sample=lambda stream_id, row_index, _time_s: (
+                    1 if row_index < boundaries[stream_id] else 2
+                ),
+            )
+            codes_by_stream: dict[str, list[str]] = {}
+            for saved_stream in result.streams:
+                lines = saved_stream.path.read_text(encoding="utf-8").splitlines()
+                header = lines[0].split(",")
+                code_index = header.index("stimulus_code")
+                codes_by_stream[saved_stream.stream_id] = [
+                    line.split(",")[code_index] for line in lines[1:]
+                ]
+
+        self.assertEqual(codes_by_stream["myo.emg"], ["1", "1", "2"])
+        self.assertEqual(codes_by_stream["myo.imu"], ["1", "2", "2"])
+
+    def test_time_and_sample_stimulus_resolvers_are_mutually_exclusive(self) -> None:
+        store = CaptureStore(stream_specs=(MYO_EMG_STREAM_SPEC,))
+        store.append_block(
+            StreamBlock(
+                MYO_EMG_STREAM_SPEC,
+                (0.0,),
+                ((0.0, 1, 2, 3, 4, 5, 6, 7, 8),),
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "either"):
+                save_capture(
+                    Path(tmp) / "capture.csv",
+                    store.snapshots(),
+                    stimulus_code_for_time=lambda _time_s: 1,
+                    stimulus_code_for_sample=lambda _stream_id, _row_index, _time_s: 1,
+                )
+
+    def test_stimulus_sidecar_adds_deterministic_scalar_miil_fields(self) -> None:
+        rows = [
+            {
+                "event_index": 1,
+                "stimulus_code": -1,
+                "planned_code": 2,
+                "label": "knee_flexion",
+                "start_time_s": 0.0,
+                "end_time_s": 5.0,
+                "status": "dropped",
+                "original_code": 2,
+                "action_key": "knee_flexion",
+                "drop_pressed_at_time_s": 3.5,
+                "start_rows": {"myo.emg": 0},
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path, row_count = save_stimulus_log(Path(tmp) / "capture.stimulus.csv", rows)
+            lines = path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(row_count, 1)
+        self.assertEqual(
+            lines[0],
+            "event_index,stimulus_code,planned_code,label,start_time_s,end_time_s,status,"
+            "action_key,drop_pressed_at_time_s,original_code",
+        )
+        self.assertNotIn("start_rows", lines[0])
+        self.assertEqual(
+            lines[1],
+            "1,-1,2,knee_flexion,0.000000,5.000000,dropped,knee_flexion,3.500000,2",
+        )
 
     def test_ads_generic_export_keeps_existing_header(self) -> None:
         store = CaptureStore(stream_specs=(ADS1299_STREAM_SPEC,))

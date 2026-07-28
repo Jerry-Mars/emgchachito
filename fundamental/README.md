@@ -19,7 +19,8 @@ In the viewport:
 - Run `source` to select and configure the acquisition source.
 - Run `acquisition` to open recording controls.
 - Run `plot` to open live plotting.
-- Run `stimulus` to open the stimulus schedule and experiment timeline.
+- Run `stimulus` to choose either the timed schedule or MIIL annotation
+  paradigm and open its experiment timeline.
 - `Esc` closes the active command-opened window.
 - The `Log Output` window is the only default visible tool window and can be
   moved, collapsed, or docked when Dear PyGui docking is available.
@@ -39,20 +40,29 @@ recording session:
 - `Start`: start or resume acquisition.
 - `Pause`: pause acquisition without closing managed W2/BWT connections, and
   pause stimulus too when this capture has a stimulus timeline.
-- `Stop`: stop acquisition, and close any active stimulus event at the latest
-  sample time.
+- `Stop`: stop acquisition, and close any active stimulus interval at the
+  current shared capture boundary.
 - `Save`: save buffered samples while paused or stopped. If the current capture
   has a stimulus timeline, save sample-aligned `stimulus_code` and the sidecar
   event log.
 
-Stimulus controls use the same recording session:
+Stimulus controls use the same recording session. The existing Timed Schedule
+keeps its duration-driven events; Manual Instruction Interval Labeling (MIIL)
+provides operator-controlled action intervals:
 
 - `Start`: start acquisition if needed and start the stimulus schedule.
 - `Pause`: pause acquisition and the stimulus timeline; no new samples are stored.
 - `Resume`: resume acquisition and continue the current stimulus event.
 - `Stop`: stop acquisition and close the current stimulus event.
-- `Restart Event`: mark the current event attempt as invalid and restart it.
-- `Save`: save EMG samples with `stimulus_code` plus a `.stimulus.csv` sidecar log.
+- `Restart Event`: in Timed Schedule, mark the current event attempt as invalid
+  and restart it.
+- MIIL action buttons: change the active positive `stimulus_code`; code `0` is
+  No Stimulus and Drop retroactively marks the current interval as code `-1`.
+- `Save`: save every populated sensor stream with `stimulus_code` plus a
+  `.stimulus.csv` sidecar log and paradigm metadata.
+
+See [the MIIL user manual](../docs/manuals/miil-user-manual.md) for the complete
+control semantics and offline trimming guidance.
 
 The plot window is display-only. It reads plottable scalar series declared by
 the active source schema, lets the user add or delete plot slots, and offers
@@ -86,6 +96,7 @@ The current shared services are:
 
 - `acquisition`: acquisition controller, selected source, and capture store owner.
 - `stimulus`: sample-time stimulus schedule and annotation model.
+- `miil`: manual interval annotation model and applied action codebook.
 - `recording_session`: shared `start/pause/resume/stop/save` coordination across
   acquisition and optional stimulus labels.
 
@@ -220,8 +231,12 @@ Stimulus saves add one sample-aligned numeric column:
 time_s,frame_counter,dropped_frames_before,emg_channel_count,stimulus_code,ch1_code,...
 ```
 
-The stimulus sidecar maps numeric codes to labels and actual event intervals:
+The Timed Schedule sidecar keeps the original base columns:
 
 ```text
 event_index,stimulus_code,planned_code,label,start_time_s,end_time_s,status
 ```
+
+MIIL appends scalar audit columns such as `action`, `original_code`,
+`duration_s`, and `drop_pressed_at_s`; its per-stream row boundaries are kept
+in `capture.metadata.json`. See the MIIL manual linked above for details.

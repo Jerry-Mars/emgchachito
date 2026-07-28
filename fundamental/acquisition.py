@@ -65,6 +65,8 @@ class AcquisitionController:
         self.stop_event: threading.Event | None = None
         self.control: WorkerControl | None = None
         self._managed_session = False
+        self._timeline_uses_shared_clock = False
+        self._timeline_time_s = 0.0
         self.last_save_path = str(csv_writer.default_capture_path())
         self.capture_metadata: dict[str, Any] = {}
         self.device_health: dict[str, dict[str, Any]] = {}
@@ -131,6 +133,21 @@ class AcquisitionController:
     @property
     def active_source_names(self) -> tuple[SourceName, ...]:
         return self._active_source_names
+
+    @property
+    def timeline_time_s(self) -> float:
+        """Return active-capture time, frozen across pauses and after stop.
+
+        Coordinated sources use their shared capture clock. Legacy sources keep
+        their existing sample-time behavior so this accessor does not change
+        protocol parsing or timestamp generation.
+        """
+
+        if self._timeline_uses_shared_clock:
+            if self.control is not None:
+                return max(0.0, float(self.control.clock.now()))
+            return max(0.0, float(self._timeline_time_s))
+        return max(0.0, float(self.buffer.latest_time_s))
 
     def active_sources(self) -> tuple[AcquisitionSource, ...]:
         return tuple(self._sources[name] for name in self._active_source_names)
@@ -331,6 +348,7 @@ class AcquisitionController:
         if self.state == AcquisitionState.STOPPED:
             specs = self._active_stream_specs()
             self.buffer.reset(specs)
+            self._timeline_time_s = 0.0
             self.last_save_path = str(csv_writer.default_capture_path(create_directory=True))
             self.capture_metadata = {
                 "capture_started_at": datetime.now().astimezone().isoformat(),
@@ -348,6 +366,7 @@ class AcquisitionController:
             bool(getattr(source, "supports_managed_lifecycle", False))
             for source in self.active_sources()
         )
+        self._timeline_uses_shared_clock = self._managed_session
         self.control = None
         if self._managed_session:
             self.control = WorkerControl(
@@ -407,6 +426,7 @@ class AcquisitionController:
         if self._managed_session and self.control is not None:
             self.control.capture_event.clear()
             self.control.clock.pause()
+            self._timeline_time_s = self.control.clock.now()
             self._drain_data_queue()
         else:
             self._stop_worker()
@@ -436,6 +456,8 @@ class AcquisitionController:
         path: str | Path | None = None,
         stimulus_code_for_time: csv_writer.StimulusCodeResolver | None = None,
         stimulus_log_rows: Sequence[dict[str, Any]] | None = None,
+        stimulus_code_for_sample: csv_writer.SampleStimulusCodeResolver | None = None,
+        stimulus_metadata: dict[str, Any] | None = None,
     ) -> str:
         if self.state in (AcquisitionState.STARTING, AcquisitionState.RUNNING):
             return "Pause or stop acquisition before saving."
@@ -445,15 +467,19 @@ class AcquisitionController:
         save_path = str(path).strip() if path is not None else self.last_save_path
         if not save_path:
             save_path = self.last_save_path
-        self.capture_metadata["device_health"] = {
+        metadata = dict(self.capture_metadata)
+        metadata["device_health"] = {
             source_id: dict(health) for source_id, health in self.device_health.items()
         }
+        if stimulus_metadata is not None:
+            metadata["stimulus"] = dict(stimulus_metadata)
         result = csv_writer.save_capture(
             save_path,
             snapshots,
             stimulus_code_for_time=stimulus_code_for_time,
+            stimulus_code_for_sample=stimulus_code_for_sample,
             stimulus_log_rows=stimulus_log_rows,
-            metadata=self.capture_metadata,
+            metadata=metadata,
         )
         self.last_save_path = str(save_path)
         stream_text = ", ".join(
@@ -560,6 +586,9 @@ class AcquisitionController:
             }
 
     def _stop_worker(self, join_timeout_s: float = 5.0) -> None:
+        if self.control is not None:
+            self.control.clock.pause()
+            self._timeline_time_s = self.control.clock.now()
         if self.stop_event is not None:
             self.stop_event.set()
         if self.control is not None:

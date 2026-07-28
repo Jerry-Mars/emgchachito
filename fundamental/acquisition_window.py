@@ -9,6 +9,7 @@ import dearpygui.dearpygui as dpg
 from fundamental.app_shell import FundamentalApp
 from fundamental.commands import CommandSpec
 from fundamental.messages import AcquisitionState
+from fundamental.miil_model import MIIL_PARADIGM_ID
 from fundamental.recording_session import RecordingSession
 from fundamental.window_manager import ManagedWindow
 
@@ -51,7 +52,7 @@ def _open_window(app: FundamentalApp, session: RecordingSession) -> str | None:
     controller = session.acquisition
     app.open_window(ACQUISITION_WINDOW_TAG)
     _sync_save_path(controller, force=True)
-    _refresh_status(controller)
+    _refresh_status(session)
     return None
 
 
@@ -102,31 +103,30 @@ def _build_window(app: FundamentalApp, session: RecordingSession) -> None:
         dpg.add_text("", tag=STATUS_TEXT_TAG)
         dpg.add_text("", tag=CONFIG_TEXT_TAG)
 
-    _refresh_status(controller)
+    _refresh_status(session)
 
 
 def _on_frame(_app: FundamentalApp, session: RecordingSession) -> None:
-    controller = session.acquisition
     if dpg.does_item_exist(ACQUISITION_WINDOW_TAG):
-        _refresh_status(controller)
+        _refresh_status(session)
 
 
 def _start(session: RecordingSession) -> str:
     result = session.start_acquisition()
     _sync_save_path(session.acquisition, force=True)
-    _refresh_status(session.acquisition)
+    _refresh_status(session)
     return result
 
 
 def _pause(session: RecordingSession) -> list[str]:
     result = session.pause()
-    _refresh_status(session.acquisition)
+    _refresh_status(session)
     return result
 
 
 def _stop(session: RecordingSession) -> list[str]:
     result = session.stop()
-    _refresh_status(session.acquisition)
+    _refresh_status(session)
     return result
 
 
@@ -135,7 +135,7 @@ def _save(session: RecordingSession) -> str:
     path = _save_path_from_window(controller)
     result = session.save(path)
     _sync_save_path(controller, force=True)
-    _refresh_status(controller)
+    _refresh_status(session)
     return result
 
 
@@ -150,21 +150,28 @@ def _run_action(app: FundamentalApp, action) -> None:
         app.log(result)
 
 
-def _refresh_status(controller: AcquisitionController) -> None:
+def _refresh_status(session: RecordingSession) -> None:
     if not dpg.does_item_exist(ACQUISITION_WINDOW_TAG):
         return
 
+    controller = session.acquisition
     state = controller.state.value.upper()
+    miil_needs_apply = (
+        controller.state == AcquisitionState.STOPPED
+        and session.selected_paradigm == MIIL_PARADIGM_ID
+        and session.miil_configuration_dirty
+    )
     dpg.set_value(
         STATUS_TEXT_TAG,
-        f"State: {state} | Rows: {controller.buffer.row_count}",
+        f"State: {state} | Rows: {controller.buffer.row_count}"
+        + (" | Apply edited MIIL actions before Start" if miil_needs_apply else ""),
     )
     dpg.set_value(CONFIG_TEXT_TAG, f"Source: {controller.source_display_text()}")
     _sync_save_path(controller)
 
     active = controller.state in (AcquisitionState.STARTING, AcquisitionState.RUNNING)
     running = controller.state == AcquisitionState.RUNNING
-    _configure_if_exists(START_BUTTON_TAG, enabled=not active)
+    _configure_if_exists(START_BUTTON_TAG, enabled=not active and not miil_needs_apply)
     _configure_if_exists(PAUSE_BUTTON_TAG, enabled=running)
     _configure_if_exists(STOP_BUTTON_TAG, enabled=controller.state != AcquisitionState.STOPPED)
     _configure_if_exists(SAVE_BUTTON_TAG, enabled=not active and controller.buffer.row_count > 0)

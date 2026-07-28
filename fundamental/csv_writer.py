@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +25,7 @@ def default_capture_path(*, create_directory: bool = False) -> Path:
 
 
 StimulusCodeResolver = Callable[[float], int]
+SampleStimulusCodeResolver = Callable[[str, int, float], int]
 
 
 @dataclass(frozen=True)
@@ -51,10 +52,16 @@ def save_capture(
     snapshots: Sequence[StreamSnapshot],
     *,
     stimulus_code_for_time: StimulusCodeResolver | None = None,
+    stimulus_code_for_sample: SampleStimulusCodeResolver | None = None,
     stimulus_log_rows: Sequence[dict[str, Any]] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> CaptureSaveResult:
     """Save each independent stream without resampling or sparse union rows."""
+
+    if stimulus_code_for_time is not None and stimulus_code_for_sample is not None:
+        raise ValueError(
+            "Provide either stimulus_code_for_time or stimulus_code_for_sample, not both."
+        )
 
     populated = [snapshot for snapshot in snapshots if snapshot.rows]
     if not populated:
@@ -70,6 +77,7 @@ def save_capture(
             output_path,
             snapshot,
             stimulus_code_for_time=stimulus_code_for_time,
+            stimulus_code_for_sample=stimulus_code_for_sample,
         )
         saved.append(SavedStream(snapshot.spec.stream_id, output_path, row_count))
 
@@ -118,9 +126,12 @@ def _save_stream(
     snapshot: StreamSnapshot,
     *,
     stimulus_code_for_time: StimulusCodeResolver | None,
+    stimulus_code_for_sample: SampleStimulusCodeResolver | None,
 ) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    include_stimulus = stimulus_code_for_time is not None
+    include_stimulus = (
+        stimulus_code_for_time is not None or stimulus_code_for_sample is not None
+    )
     metadata_fields = [field for field in snapshot.spec.fields if field.role == "metadata"]
     signal_fields = [field for field in snapshot.spec.fields if field.role == "signal"]
     field_indexes = snapshot.spec.field_index
@@ -135,7 +146,20 @@ def _save_stream(
                 *[field.key for field in signal_fields],
             ]
         )
-        for timestamp, row in zip(snapshot.time_s, snapshot.rows, strict=True):
+        for row_index, (timestamp, row) in enumerate(
+            zip(snapshot.time_s, snapshot.rows, strict=True)
+        ):
+            stimulus_code: int | None = None
+            if stimulus_code_for_sample is not None:
+                stimulus_code = int(
+                    stimulus_code_for_sample(
+                        snapshot.spec.stream_id,
+                        row_index,
+                        float(timestamp),
+                    )
+                )
+            elif stimulus_code_for_time is not None:
+                stimulus_code = int(stimulus_code_for_time(float(timestamp)))
             writer.writerow(
                 [
                     f"{float(timestamp):.6f}",
@@ -143,11 +167,7 @@ def _save_stream(
                         _format_field_value(field, row[field_indexes[field.key]])
                         for field in metadata_fields
                     ],
-                    *(
-                        [int(stimulus_code_for_time(float(timestamp)))]
-                        if stimulus_code_for_time is not None
-                        else []
-                    ),
+                    *([stimulus_code] if stimulus_code is not None else []),
                     *[
                         _format_field_value(field, row[field_indexes[field.key]])
                         for field in signal_fields
@@ -184,7 +204,7 @@ def stimulus_log_path(capture_path: str | Path) -> Path:
 def save_stimulus_log(path: str | Path, rows: Sequence[dict[str, Any]]) -> tuple[Path, int]:
     output_path = Path(path).expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = [
+    base_fieldnames = [
         "event_index",
         "stimulus_code",
         "planned_code",
@@ -193,6 +213,21 @@ def save_stimulus_log(path: str | Path, rows: Sequence[dict[str, Any]]) -> tuple
         "end_time_s",
         "status",
     ]
+    base_fieldname_set = set(base_fieldnames)
+    extra_candidates = sorted(
+        {
+            fieldname
+            for row in rows
+            for fieldname in row
+            if fieldname not in base_fieldname_set
+        }
+    )
+    extra_fieldnames = [
+        fieldname
+        for fieldname in extra_candidates
+        if all(_is_csv_scalar(row.get(fieldname)) for row in rows)
+    ]
+    fieldnames = [*base_fieldnames, *extra_fieldnames]
 
     with output_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -200,13 +235,8 @@ def save_stimulus_log(path: str | Path, rows: Sequence[dict[str, Any]]) -> tuple
         for row in rows:
             writer.writerow(
                 {
-                    "event_index": row.get("event_index", ""),
-                    "stimulus_code": row.get("stimulus_code", ""),
-                    "planned_code": row.get("planned_code", ""),
-                    "label": row.get("label", ""),
-                    "start_time_s": _format_optional_time(row.get("start_time_s")),
-                    "end_time_s": _format_optional_time(row.get("end_time_s")),
-                    "status": row.get("status", ""),
+                    fieldname: _format_stimulus_value(fieldname, row.get(fieldname))
+                    for fieldname in fieldnames
                 }
             )
 
@@ -217,3 +247,21 @@ def _format_optional_time(value: object) -> str:
     if value is None:
         return ""
     return f"{float(value):.6f}"
+
+
+def _is_csv_scalar(value: object) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _format_stimulus_value(fieldname: str, value: object) -> object:
+    if value is None:
+        return ""
+    if (
+        fieldname.endswith("_time_s")
+        or fieldname.endswith("_at_s")
+        or fieldname.endswith("duration_s")
+    ):
+        return _format_optional_time(value)
+    if isinstance(value, Mapping):
+        return ""
+    return value
