@@ -20,6 +20,7 @@ def build_app() -> FundamentalApp:
     app.register_service("acquisition", acquisition)
     app.register_service("stimulus", stimulus)
     app.register_service("miil", session.miil)
+    app.register_service("guided_sequence", session.guided_sequence)
     app.register_service("recording_session", session)
     app.register_frame_callback(lambda frame_app: session.on_frame(frame_app.log))
     register_source_config(app, acquisition)

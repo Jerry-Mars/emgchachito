@@ -21,7 +21,7 @@ from fundamental.streams import CaptureResumeState, FieldSpec, StreamBlock, Stre
 from fundamental.transports import BleGattConfig, BleGattTransport
 
 
-DEFAULT_BWT901_ADDRESS = "CF:B6:E0:FC:2F:98"
+DEFAULT_BWT901_ADDRESS = "E9:34:17:08:9F:4A"
 DEFAULT_BWT901_NAME_FILTER = "WT901BLE67"
 DEFAULT_BWT901_SERVICE_UUID = "0000ffe5-0000-1000-8000-00805f9a34fb"
 DEFAULT_BWT901_WRITE_UUID = "0000ffe9-0000-1000-8000-00805f9a34fb"

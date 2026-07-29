@@ -16,6 +16,9 @@ uv run python -m fundamental.main
 In the viewport:
 
 - `Ctrl+Shift+P` opens the command palette.
+- In an active MIIL Guided Sequence, `Enter` or numeric-keypad Enter advances
+  one planned instruction when the Stimulus window is visible and no editor or
+  command-palette control has focus. Plot may still hold the active focus.
 - Run `source` to select and configure the acquisition source.
 - Run `acquisition` to open recording controls.
 - Run `plot` to open live plotting.
@@ -58,11 +61,21 @@ provides operator-controlled action intervals:
   and restart it.
 - MIIL action buttons: change the active positive `stimulus_code`; code `0` is
   No Stimulus and Drop retroactively marks the current interval as code `-1`.
+- MIIL Guided Sequence: optionally pre-arrange one action pattern and repeat
+  count, then advance it one operator-paced step at a time with Enter. It does
+  not assign action durations. Drop retries the same planned step; No Stimulus
+  completes a valid step and inserts a code-`0` buffer.
 - `Save`: save every populated sensor stream with `stimulus_code` plus a
-  `.stimulus.csv` sidecar log and paradigm metadata.
+  `.stimulus.csv` sidecar log and paradigm metadata. During an active Guided
+  Sequence, Save first pauses all channels and writes a partial checkpoint;
+  the operator can then Resume the same step or Stop.
 
 See [the MIIL user manual](../docs/manuals/miil-user-manual.md) for the complete
 control semantics and offline trimming guidance.
+
+For implementation ownership, lifecycle diagrams, data contracts, extension
+procedures, testing, and refactoring boundaries, see the
+[Development Wiki](../docs/development-wiki/README.md).
 
 The plot window is display-only. It reads plottable scalar series declared by
 the active source schema, lets the user add or delete plot slots, and offers
@@ -97,6 +110,8 @@ The current shared services are:
 - `acquisition`: acquisition controller, selected source, and capture store owner.
 - `stimulus`: sample-time stimulus schedule and annotation model.
 - `miil`: manual interval annotation model and applied action codebook.
+- `guided_sequence`: configured MIIL action-order plan; its per-capture runtime
+  is frozen and coordinated by the recording session.
 - `recording_session`: shared `start/pause/resume/stop/save` coordination across
   acquisition and optional stimulus labels.
 
@@ -116,14 +131,13 @@ changes unless acquisition is stopped. Current sources:
 - `ble_myo`: Myo armband worker using `pymyo` over `bleak`; it can acquire raw
   8-channel EMG, IMU, or both.
 
-The current W2 experiment default is four serial devices on `COM9`, `COM11`,
-`COM12`, and `COM13` at `256000 8N1` with a `0.05 s` timeout. Device rows may
-instead use an explicit BLE address. Multiple BLE rows require unique addresses.
-The first BWT901 row uses
-the verified demo address `CF:B6:E0:FC:2F:98`; a second row remains optional and
-also requires its own address. W2 and BWT901 can be enabled together. They all
-connect before the shared capture gate opens; a required-device failure stops
-the full set.
+The current W2 experiment default is five serial devices on `COM9`, `COM11`,
+`COM12`, `COM13`, and `COM10` at `256000 8N1` with a `0.05 s` timeout. Device
+rows may instead use an explicit BLE address. Multiple BLE rows require unique
+addresses. The first BWT901 row uses `E9:34:17:08:9F:4A`; a second row remains
+optional and also requires its own address. W2 and BWT901 can be enabled
+together. They all connect before the shared capture gate opens; a
+required-device failure stops the full set.
 
 Pause keeps Serial/BLE handles open. W2 receives its stop command while paused;
 BWT901 notifications remain subscribed but decoded samples are not appended.

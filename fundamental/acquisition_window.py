@@ -161,20 +161,56 @@ def _refresh_status(session: RecordingSession) -> None:
         and session.selected_paradigm == MIIL_PARADIGM_ID
         and session.miil_configuration_dirty
     )
+    guided_needs_apply = (
+        controller.state == AcquisitionState.STOPPED
+        and session.selected_paradigm == MIIL_PARADIGM_ID
+        and session.guided_sequence_enabled
+        and session.guided_sequence_configuration_dirty
+    )
     dpg.set_value(
         STATUS_TEXT_TAG,
         f"State: {state} | Rows: {controller.buffer.row_count}"
-        + (" | Apply edited MIIL actions before Start" if miil_needs_apply else ""),
+        + (" | Apply edited MIIL actions before Start" if miil_needs_apply else "")
+        + (
+            " | Apply Guided Sequence before Start"
+            if guided_needs_apply
+            else ""
+        ),
     )
     dpg.set_value(CONFIG_TEXT_TAG, f"Source: {controller.source_display_text()}")
     _sync_save_path(controller)
 
     active = controller.state in (AcquisitionState.STARTING, AcquisitionState.RUNNING)
     running = controller.state == AcquisitionState.RUNNING
-    _configure_if_exists(START_BUTTON_TAG, enabled=not active and not miil_needs_apply)
+    _configure_if_exists(
+        START_BUTTON_TAG,
+        enabled=(
+            not active
+            and not miil_needs_apply
+            and not guided_needs_apply
+            and not (
+                controller.state == AcquisitionState.PAUSED
+                and session.guided_sequence_completed
+            )
+        ),
+    )
     _configure_if_exists(PAUSE_BUTTON_TAG, enabled=running)
     _configure_if_exists(STOP_BUTTON_TAG, enabled=controller.state != AcquisitionState.STOPPED)
-    _configure_if_exists(SAVE_BUTTON_TAG, enabled=not active and controller.buffer.row_count > 0)
+    _configure_if_exists(
+        SAVE_BUTTON_TAG,
+        label=(
+            "Pause & Save"
+            if session.can_pause_and_save_guided_sequence
+            else "Save"
+        ),
+        enabled=(
+            controller.buffer.row_count > 0
+            and (
+                not active
+                or session.can_pause_and_save_guided_sequence
+            )
+        ),
+    )
 
 
 def _save_path_from_window(controller: AcquisitionController) -> str:

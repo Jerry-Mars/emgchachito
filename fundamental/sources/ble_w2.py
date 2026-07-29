@@ -107,6 +107,7 @@ DEFAULT_W2_DEVICES = (
     W2DeviceConfig("w2_2", "serial", port="COM11", device_name_filter="RunE W22"),
     W2DeviceConfig("w2_3", "serial", port="COM12", device_name_filter="RunE W23"),
     W2DeviceConfig("w2_4", "serial", port="COM13", device_name_filter="RunE W24"),
+    W2DeviceConfig("w2_5", "serial", port="COM10", device_name_filter="RunE W25"),
 )
 
 

@@ -205,7 +205,7 @@ class BLEW2SourceTests(unittest.TestCase):
 
 
 class W2SerialConfigTests(unittest.TestCase):
-    def test_w2_defaults_match_the_current_four_serial_device_setup(self) -> None:
+    def test_w2_defaults_match_the_current_five_serial_device_setup(self) -> None:
         device = W2SerialDeviceConfig()
         config = W2BLEConfig()
         experiment_config = default_w2_config()
@@ -225,6 +225,7 @@ class W2SerialConfigTests(unittest.TestCase):
                 ("w2_2", "serial", "COM11", "RunE W22"),
                 ("w2_3", "serial", "COM12", "RunE W23"),
                 ("w2_4", "serial", "COM13", "RunE W24"),
+                ("w2_5", "serial", "COM10", "RunE W25"),
             ],
         )
 

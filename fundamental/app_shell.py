@@ -21,6 +21,7 @@ PALETTE_LIST_TAG = "fundamental.command_palette.list"
 
 FrameCallback = Callable[["FundamentalApp"], None]
 ShutdownCallback = Callable[["FundamentalApp"], None]
+ContextEnterHandler = Callable[["FundamentalApp"], bool]
 
 
 class FundamentalApp:
@@ -31,6 +32,8 @@ class FundamentalApp:
         self.window_manager = WindowManager()
         self._frame_callbacks: list[FrameCallback] = []
         self._shutdown_callbacks: list[ShutdownCallback] = []
+        self._context_enter_handlers: list[ContextEnterHandler] = []
+        self._held_enter_keys: set[int] = set()
         self._services: dict[str, Any] = {}
         self._log_entries: list[str] = []
         self._ui_ready = False
@@ -45,6 +48,11 @@ class FundamentalApp:
 
     def register_shutdown_callback(self, callback: ShutdownCallback) -> None:
         self._shutdown_callbacks.append(callback)
+
+    def register_context_enter_handler(self, callback: ContextEnterHandler) -> None:
+        """Register an application-local Enter action behind shell priorities."""
+
+        self._context_enter_handlers.append(callback)
 
     def register_service(self, name: str, service: Any) -> None:
         if name in self._services:
@@ -216,7 +224,17 @@ class FundamentalApp:
         with dpg.handler_registry(tag="fundamental.handlers"):
             dpg.add_key_press_handler(key=dpg.mvKey_P, callback=self._handle_palette_shortcut)
             dpg.add_key_press_handler(key=dpg.mvKey_Escape, callback=self._handle_escape)
-            dpg.add_key_press_handler(key=dpg.mvKey_Return, callback=self._handle_enter)
+            for key in (dpg.mvKey_Return, dpg.mvKey_NumPadEnter):
+                dpg.add_key_press_handler(
+                    key=key,
+                    callback=self._handle_enter_press,
+                    user_data=key,
+                )
+                dpg.add_key_release_handler(
+                    key=key,
+                    callback=self._handle_enter_release,
+                    user_data=key,
+                )
 
     def _configure_docking(self) -> None:
         try:
@@ -230,6 +248,12 @@ class FundamentalApp:
             self.log(f"Docking unavailable: {exc}")
 
     def _run_frame_callbacks(self) -> None:
+        for key in tuple(self._held_enter_keys):
+            try:
+                if not dpg.is_key_down(key):
+                    self._held_enter_keys.discard(key)
+            except SystemError:
+                self._held_enter_keys.discard(key)
         for callback in list(self._frame_callbacks):
             callback(self)
 
@@ -260,9 +284,37 @@ class FundamentalApp:
         if closed_tag:
             self.log(f"Closed window: {closed_tag}")
 
-    def _handle_enter(self, *_args) -> None:
+    def _handle_enter_press(self, _sender=None, _app_data=None, user_data=None) -> None:
+        key = int(dpg.mvKey_Return if user_data is None else user_data)
+        if key in self._held_enter_keys:
+            return
+        self._held_enter_keys.add(key)
+
         if self.window_manager.is_shown(PALETTE_WINDOW_TAG):
             self._execute_palette_input()
+            return
+        if self._is_ctrl_down() or self._is_shift_down() or self._is_alt_down():
+            return
+        if self._focused_item_consumes_enter():
+            return
+
+        for callback in reversed(self._context_enter_handlers):
+            try:
+                if callback(self):
+                    return
+            except Exception as exc:
+                self.log(f"Context Enter handler failed: {exc}")
+                return
+
+    def _handle_enter_release(self, _sender=None, _app_data=None, user_data=None) -> None:
+        key = int(dpg.mvKey_Return if user_data is None else user_data)
+        self._held_enter_keys.discard(key)
+
+    def _handle_enter(self, *_args) -> None:
+        """Compatibility entry point for direct callers of the old handler."""
+
+        self._handle_enter_press(user_data=dpg.mvKey_Return)
+        self._handle_enter_release(user_data=dpg.mvKey_Return)
 
     def _handle_palette_input_change(self, _sender, value, _user_data=None) -> None:
         self._refresh_command_list(str(value))
@@ -325,6 +377,41 @@ class FundamentalApp:
 
     def _is_shift_down(self) -> bool:
         return self._is_any_key_down(("mvKey_Shift", "mvKey_LShift", "mvKey_RShift"))
+
+    def _is_alt_down(self) -> bool:
+        return self._is_any_key_down(("mvKey_LAlt", "mvKey_RAlt"))
+
+    @staticmethod
+    def _focused_item_consumes_enter() -> bool:
+        try:
+            focused_item = dpg.get_focused_item()
+        except (RuntimeError, SystemError):
+            return False
+        if not focused_item:
+            return False
+        try:
+            if not dpg.is_item_enabled(focused_item):
+                return False
+            info = dpg.get_item_info(focused_item)
+            if bool(info.get("edited_handler_applicable")):
+                return True
+            item_type = str(dpg.get_item_type(focused_item))
+        except (RuntimeError, SystemError):
+            return False
+        return any(
+            token in item_type
+            for token in (
+                "mvInput",
+                "mvDrag",
+                "mvSlider",
+                "mvCombo",
+                "mvButton",
+                "mvCheckbox",
+                "mvRadioButton",
+                "mvSelectable",
+                "mvMenuItem",
+            )
+        )
 
     @staticmethod
     def _is_any_key_down(names: tuple[str, ...]) -> bool:

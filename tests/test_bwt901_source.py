@@ -50,8 +50,9 @@ class BWT901ProtocolTests(unittest.TestCase):
 
 
 class BWT901SourceTests(unittest.TestCase):
-    def test_default_config_uses_verified_demo_address_and_unknown_rate(self) -> None:
+    def test_default_config_uses_current_address_and_unknown_rate(self) -> None:
         source = BWT901Source()
+        self.assertEqual(DEFAULT_BWT901_ADDRESS, "E9:34:17:08:9F:4A")
         self.assertEqual(source.config.devices[0].address, DEFAULT_BWT901_ADDRESS)
         spec = source.stream_specs()[0]
         self.assertIsNone(spec.nominal_rate_hz)

@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from fundamental.capture_store import CaptureStore
+from fundamental.guided_sequence import GuidedSequenceState
 from fundamental.messages import AcquisitionState
-from fundamental.miil_model import MIILAction
+from fundamental.miil_model import CapturePosition, MIILAction, MIILController
 from fundamental.recording_session import RecordingSession
 from fundamental.sources.serial_ads1299 import ADS1299_STREAM_SPEC
 from fundamental.streams import StreamBlock
@@ -116,6 +117,16 @@ class QueuedFakeAcquisition(FakeAcquisition):
         return appended
 
 
+class RefusingPauseAcquisition(FakeAcquisition):
+    def pause(self) -> str:
+        return "Acquisition pause was refused."
+
+
+class RejectingActionMIIL(MIILController):
+    def select_action(self, code: int, position: CapturePosition) -> str:
+        return f"MIIL action code {code} was rejected for the test."
+
+
 def append_frame(acquisition: FakeAcquisition, time_s: float, counter: int = 1) -> None:
     acquisition.buffer.append_block(
         StreamBlock(
@@ -127,6 +138,219 @@ def append_frame(acquisition: FakeAcquisition, time_s: float, counter: int = 1) 
 
 
 class RecordingSessionTests(unittest.TestCase):
+    def _guided_session(
+        self,
+        acquisition: FakeAcquisition | None = None,
+        *,
+        pattern: list[int] | None = None,
+        repeat_count: int = 1,
+    ) -> tuple[FakeAcquisition, RecordingSession]:
+        controller = FakeAcquisition() if acquisition is None else acquisition
+        session = RecordingSession(controller, StimulusController())  # type: ignore[arg-type]
+        self.assertIsNone(session.set_paradigm("miil"))
+        self.assertIn("enabled", session.set_guided_sequence_enabled(True))
+        self.assertIn(
+            "Applied Guided Sequence",
+            session.apply_guided_sequence(pattern or [1, 2], repeat_count),
+        )
+        return controller, session
+
+    def test_guided_sequence_requires_an_applied_plan(self) -> None:
+        acquisition = FakeAcquisition()
+        session = RecordingSession(acquisition, StimulusController())  # type: ignore[arg-type]
+        session.set_paradigm("miil")
+        session.set_guided_sequence_enabled(True)
+
+        self.assertIn("Apply", session.start_acquisition())
+        self.assertEqual(acquisition.state, AcquisitionState.STOPPED)
+        self.assertIn("cannot be empty", session.apply_guided_sequence([], 1))
+        self.assertIn("Adjacent", session.apply_guided_sequence([1, 1], 1))
+
+    def test_guided_enter_walks_plan_and_final_enter_pauses_all(self) -> None:
+        acquisition, session = self._guided_session(pattern=[1, 2], repeat_count=2)
+        self.assertIn("waiting", session.start_acquisition())
+        runner = session.capture_guided_sequence
+        assert runner is not None
+        self.assertEqual(runner.state, GuidedSequenceState.WAITING_FIRST)
+        self.assertEqual(session.miil.current_code, 0)
+
+        expected_codes = [1, 2, 1, 2]
+        for index, code in enumerate(expected_codes, start=1):
+            append_frame(acquisition, float(index), counter=index)
+            self.assertIn("started", session.advance_guided_sequence().casefold())
+            self.assertEqual(session.miil.current_code, code)
+
+        self.assertEqual(acquisition.state, AcquisitionState.RUNNING)
+        append_frame(acquisition, 5.0, counter=5)
+        finish = session.advance_guided_sequence()
+
+        self.assertIn("Final guided action completed", finish)
+        self.assertEqual(runner.state, GuidedSequenceState.COMPLETED)
+        self.assertEqual(runner.completed_step_count, 4)
+        self.assertEqual(session.miil.current_code, 0)
+        self.assertEqual(session.miil.state, StimulusState.PAUSED)
+        self.assertEqual(acquisition.state, AcquisitionState.PAUSED)
+        self.assertIn("save or stop", session.resume()[0])
+
+        session.save("guided.csv")
+        save_call = acquisition.save_calls[-1]
+        guided = save_call["stimulus_metadata"]["guided_sequence"]
+        self.assertEqual(guided["status_at_save"], "completed")
+        self.assertEqual(guided["plan"]["pattern_codes"], [1, 2])
+        self.assertEqual(guided["plan"]["repeat_count"], 2)
+        action_rows = [
+            row for row in save_call["stimulus_log_rows"] if row.get("guided_role")
+        ]
+        self.assertEqual(len(action_rows), 4)
+        self.assertTrue(all(row["guided_outcome"] == "completed_by_enter" for row in action_rows))
+
+    def test_completed_guided_capture_can_stop_and_start_a_new_capture(self) -> None:
+        acquisition, session = self._guided_session(pattern=[1])
+        session.start_acquisition()
+        session.advance_guided_sequence()
+        session.advance_guided_sequence()
+        self.assertTrue(session.guided_sequence_completed)
+        self.assertEqual(acquisition.state, AcquisitionState.PAUSED)
+
+        session.stop()
+        self.assertEqual(acquisition.state, AcquisitionState.STOPPED)
+        self.assertIn("waiting", session.start_acquisition())
+
+        next_runner = session.capture_guided_sequence
+        assert next_runner is not None
+        self.assertEqual(next_runner.state, GuidedSequenceState.WAITING_FIRST)
+        self.assertFalse(session.guided_sequence_completed)
+
+    def test_guided_drop_retries_same_step_and_no_inserts_buffer(self) -> None:
+        acquisition, session = self._guided_session(pattern=[1, 2])
+        session.start_acquisition()
+        append_frame(acquisition, 0.5)
+        session.advance_guided_sequence()
+        append_frame(acquisition, 1.0, counter=2)
+
+        self.assertIn("Enter will retry", session.drop_miil_current())
+        runner = session.capture_guided_sequence
+        assert runner is not None
+        self.assertEqual(runner.completed_step_count, 0)
+        self.assertEqual(session.miil.current_code, -1)
+
+        append_frame(acquisition, 1.5, counter=3)
+        self.assertIn("Retrying", session.advance_guided_sequence())
+        self.assertEqual(session.miil.current_code, 1)
+        self.assertEqual(runner.attempts[-1].step_attempt_number, 2)
+
+        append_frame(acquisition, 2.0, counter=4)
+        self.assertIn("buffer", session.select_no_stimulus())
+        self.assertEqual(session.miil.current_code, 0)
+        self.assertEqual(runner.completed_step_count, 1)
+        self.assertEqual(runner.state, GuidedSequenceState.BUFFER)
+
+        append_frame(acquisition, 2.5, counter=5)
+        session.advance_guided_sequence()
+        self.assertEqual(session.miil.current_code, 2)
+        self.assertEqual(runner.attempts[0].status.value, "dropped")
+
+    def test_guided_manual_action_is_rejected_without_creating_a_boundary(self) -> None:
+        _acquisition, session = self._guided_session(pattern=[1, 2])
+        session.start_acquisition()
+        interval_count = len(session.miil.intervals)
+
+        message = session.select_miil_action(1)
+
+        self.assertIn("disabled", message)
+        self.assertEqual(len(session.miil.intervals), interval_count)
+        self.assertEqual(session.miil.current_code, 0)
+
+    def test_guided_miil_effect_failure_aborts_and_stops_acquisition(self) -> None:
+        acquisition = FakeAcquisition()
+        session = RecordingSession(
+            acquisition,  # type: ignore[arg-type]
+            StimulusController(),
+            RejectingActionMIIL(),
+        )
+        session.set_paradigm("miil")
+        session.set_guided_sequence_enabled(True)
+        session.apply_guided_sequence([1], 1)
+        session.start_acquisition()
+
+        message = session.advance_guided_sequence()
+
+        self.assertIn("safety stop", message)
+        self.assertEqual(acquisition.state, AcquisitionState.STOPPED)
+        runner = session.capture_guided_sequence
+        assert runner is not None
+        self.assertEqual(runner.state, GuidedSequenceState.ABORTED)
+        self.assertEqual(runner.attempts[-1].status.value, "aborted")
+
+    def test_guided_completion_pause_failure_becomes_aborted_safety_stop(self) -> None:
+        acquisition = RefusingPauseAcquisition()
+        _controller, session = self._guided_session(acquisition, pattern=[1])
+        session.start_acquisition()
+        session.advance_guided_sequence()
+
+        message = session.advance_guided_sequence()
+
+        self.assertIn("safety stop", message)
+        self.assertEqual(acquisition.state, AcquisitionState.STOPPED)
+        runner = session.capture_guided_sequence
+        assert runner is not None
+        self.assertEqual(runner.state, GuidedSequenceState.ABORTED)
+
+    def test_guided_pause_and_save_checkpoint_remains_paused_then_resumes(self) -> None:
+        acquisition, session = self._guided_session(pattern=[1, 2])
+        session.start_acquisition()
+        append_frame(acquisition, 0.5)
+        session.advance_guided_sequence()
+        append_frame(acquisition, 1.0, counter=2)
+
+        message = session.save("checkpoint.csv")
+
+        self.assertIn("checkpoint", message)
+        self.assertEqual(acquisition.state, AcquisitionState.PAUSED)
+        self.assertEqual(session.miil.state, StimulusState.PAUSED)
+        runner = session.capture_guided_sequence
+        assert runner is not None
+        self.assertEqual(runner.state, GuidedSequenceState.PAUSED)
+        metadata = acquisition.save_calls[-1]["stimulus_metadata"]["guided_sequence"]
+        self.assertEqual(metadata["status_at_save"], "partial_checkpoint")
+        self.assertEqual(metadata["attempts"][0]["outcome"], "active_at_save")
+
+        self.assertTrue(any("resumed" in item.lower() for item in session.resume()))
+        self.assertEqual(acquisition.state, AcquisitionState.RUNNING)
+        self.assertEqual(runner.state, GuidedSequenceState.ACTIVE)
+        self.assertEqual(session.miil.current_code, 1)
+
+    def test_guided_capture_plan_is_frozen_when_next_plan_is_applied(self) -> None:
+        acquisition, session = self._guided_session(pattern=[1, 2], repeat_count=2)
+        session.start_acquisition()
+        session.advance_guided_sequence()
+        session.stop()
+
+        self.assertIn("Applied", session.apply_guided_sequence([2, 1], 3))
+        self.assertIs(session.guided_sequence_runtime, session.guided_sequence)
+        session.save("old-capture.csv")
+
+        guided = acquisition.save_calls[-1]["stimulus_metadata"]["guided_sequence"]
+        self.assertEqual(guided["plan"]["pattern_codes"], [1, 2])
+        self.assertEqual(guided["plan"]["repeat_count"], 2)
+        self.assertEqual(guided["status_at_save"], "stopped_early")
+
+    def test_guided_runner_waits_for_ready_barrier_and_aborts_on_failure(self) -> None:
+        acquisition = StartingFakeAcquisition()
+        _controller, session = self._guided_session(acquisition, pattern=[1, 2])
+
+        session.start_acquisition()
+        runner = session.capture_guided_sequence
+        assert runner is not None
+        self.assertEqual(runner.state, GuidedSequenceState.READY)
+        self.assertIn("only be changed", session.advance_guided_sequence())
+
+        session.on_frame()
+        self.assertEqual(runner.state, GuidedSequenceState.WAITING_FIRST)
+        acquisition.fail_on_drain = True
+        session.on_frame()
+        self.assertEqual(runner.state, GuidedSequenceState.ABORTED)
+
     def test_miil_selected_acquisition_start_automatically_opens_no_stimulus(self) -> None:
         acquisition = FakeAcquisition()
         session = RecordingSession(acquisition, StimulusController())  # type: ignore[arg-type]
