@@ -237,9 +237,28 @@ and bind both widgets to it.
 
 ## Generic Plot window
 
-The Plot window depends only on `CaptureStore` and `SeriesSpec`. It does not
-know W2/BWT protocols and does not inspect stimulus controllers
-([`plot_window.py`](../../fundamental/plot_window.py#L340)).
+The Plot window depends on the structural, read-only `PlotDataProvider`
+protocol and the generic `SeriesSpec`/`SeriesWindow` contracts. `CaptureStore`
+is the current provider, but Plot does not import it, know W2/BWT protocols, or
+inspect acquisition and stimulus controllers
+([`plot_window.py`](../../fundamental/plot_window.py)).
+
+### Catalog lifecycle and module independence
+
+`PlotWindowState` starts empty: it does not capture the application's initial
+ADS1299 schema or any other source schema during registration. On every frame,
+and again before the first lazy window build, it pulls the current immutable
+`SeriesSpec` tuple from its provider and reconciles that tuple with its cached
+catalog. The complete specs form the signature, so changes to units, labels,
+signal kind, rate, or display hints are detected even when series IDs remain
+the same.
+
+Catalog reconciliation, widget rebuilding, and value refresh are deliberately
+one-way operations. Rebuilding the slot widget tree never calls catalog
+refresh. This prevents a first-open source change from recursively deleting and
+rebuilding Dear PyGui children while their original build is still active.
+When the provider has no series, Plot remains a valid empty window and creates
+generic Raw slots only after series become available.
 
 ### Series discovery
 
@@ -301,7 +320,9 @@ not mutate `CaptureStore` and has no effect on saved CSV values.
 
 ### EMG and IMU view contract
 
-`SeriesSpec.view_options` is based on `signal_kind`
+New slots begin with the first view advertised by `SeriesSpec.view_options`
+(currently Raw for every signal kind); Plot does not assign transforms by slot
+position. `SeriesSpec.view_options` is based on `signal_kind`
 ([`streams.py`](../../fundamental/streams.py#L133)):
 
 | Signal kind | Available views | Status text |
@@ -338,7 +359,8 @@ The shell boundaries worth preserving are:
 - feature modules register commands and lazy windows;
 - the command registry remains independent of Dear PyGui;
 - application-wide key priority is centralized;
-- Plot consumes generic `CaptureStore` series, never source protocols; and
+- Plot consumes a generic read-only `PlotDataProvider`, never `CaptureStore`
+  mutation APIs or source protocols; and
 - display processing never alters saved raw data.
 
 Recommended incremental improvements:
