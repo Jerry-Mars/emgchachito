@@ -38,8 +38,9 @@ class SeriesSpec:
 
 @dataclass(frozen=True)
 class SeriesWindow:
-    """Recent values for one plot series."""
+    """Recent values for one plot series on a shared display timeline."""
 
     spec: SeriesSpec
     time_s: list[float]
     values: list[float]
+    reference_time_s: float | None = None

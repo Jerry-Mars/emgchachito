@@ -15,15 +15,18 @@ class _SeriesBinding:
 
 
 class BufferedPlotProvider:
-    """
-    Read-only PlotDataProvider over RealtimeStreamStore.
+    """Read-only PlotDataProvider over :class:`RealtimeStreamStore`.
 
-    time_s returned to Plot is a nominal display coordinate:
+    The realtime store selects rows by host-monotonic observation time.  This
+    provider then chooses a display coordinate:
 
-        sample_index / nominal_rate_hz
+    * known nominal rate -> regular spacing anchored to the stream's latest
+      host observation;
+    * unknown nominal rate -> direct host-monotonic observation time.
 
-    It is intentionally NOT presented as a device timestamp.
-    PlotWindow currently only uses it to construct relative x coordinates.
+    In both cases ``SeriesWindow.reference_time_s`` is the same latest host
+    observation across the whole store, so different streams can share the
+    Plot x-axis reference without pretending that they share a device clock.
     """
 
     def __init__(
@@ -96,12 +99,28 @@ class BufferedPlotProvider:
             return None
 
         rate = snapshot.schema.nominal_rate_hz
+        latest_row = snapshot.rows[-1]
 
-        # Derived plotting coordinate only.
-        time_s = [
-            row.sample_index / rate
-            for row in snapshot.rows
-        ]
+        if rate is None:
+            time_s = [
+                row.host_monotonic_ns / 1_000_000_000.0
+                for row in snapshot.rows
+            ]
+        else:
+            # Keep a regular nominal sample spacing without inventing a device
+            # clock: anchor only the latest normalized sample to the stream's
+            # latest host observation and reconstruct relative spacing backward.
+            anchor_s = latest_row.host_monotonic_ns / 1_000_000_000.0
+            time_s = [
+                anchor_s + (row.runtime_index - latest_row.runtime_index) / rate
+                for row in snapshot.rows
+            ]
+
+        reference_time_s = (
+            None
+            if snapshot.reference_monotonic_ns is None
+            else snapshot.reference_monotonic_ns / 1_000_000_000.0
+        )
 
         values = [
             row.values[binding.field_index]
@@ -112,6 +131,7 @@ class BufferedPlotProvider:
             spec=binding.spec,
             time_s=time_s,
             values=values,
+            reference_time_s=reference_time_s,
         )
 
     def latest_series_values(

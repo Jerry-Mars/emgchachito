@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-import queue
-
 from assembly.acquisition.BLE.myo_worker import MyoRecord
-from assembly.acquisition.runtime.stream_store import RealtimeStreamStore, StreamSchema
+from assembly.acquisition.runtime.stream_store import (
+    RealtimeStreamStore,
+    StreamSample,
+    StreamSchema,
+)
 
 
 MYO_EMG_STREAM_ID = "myo.emg"
@@ -41,46 +43,22 @@ MYO_STREAM_SCHEMAS = (
 
 
 class MyoRecordIngestor:
+    """Convert raw MyoWorker records into normalized runtime stream samples.
+
+    Queue draining is intentionally not part of this class.  A generic
+    ``QueuePump`` owns that mechanical concern, while this class only knows how
+    to interpret Myo record structure.
+
+    The current ``notification_index`` / ``sample_index`` values emitted by
+    MyoWorker are host-generated worker counters, not device-provided indices.
+    They therefore do not become runtime sample identity here.  The store owns
+    its normalized ``runtime_index``.  A future counter genuinely supplied by a
+    device/protocol should be retained explicitly with its device semantics.
     """
-    Drain MyoWorker records into a RealtimeStreamStore.
 
-    No thread is created here.
-
-    The caller decides *when* drain() is executed.  The first integration
-    uses the GUI loop; later this can move to its own consumer thread
-    without changing the store or Plot provider.
-    """
-
-    def __init__(
-        self,
-        records: queue.Queue[MyoRecord],
-        store: RealtimeStreamStore,
-    ) -> None:
-        self.records = records
+    def __init__(self, store: RealtimeStreamStore) -> None:
         self.store = store
-
         self._validate_store()
-
-    def drain(self, max_records: int = 1024) -> int:
-        """
-        Consume up to max_records currently waiting in the worker queue.
-
-        Returns the number of Myo records consumed.
-        """
-
-        max_records = max(1, int(max_records))
-        consumed = 0
-
-        while consumed < max_records:
-            try:
-                record = self.records.get_nowait()
-            except queue.Empty:
-                break
-
-            self.ingest(record)
-            consumed += 1
-
-        return consumed
 
     def ingest(self, record: MyoRecord) -> None:
         stream = record.get("stream")
@@ -96,27 +74,25 @@ class MyoRecordIngestor:
         raise ValueError(f"Unsupported Myo record stream: {stream!r}")
 
     def _ingest_emg(self, record: MyoRecord) -> None:
-        notification_index = int(record["notification_index"])
         host_monotonic_ns = int(record["host_monotonic_ns"])
         host_unix_ns = int(record["host_unix_ns"])
-
         samples = tuple(record["samples"])  # type: ignore[arg-type]
 
-        # Current MyoWorker contract guarantees two 8-channel samples
-        # per notification.
-        #
-        # sample_index is a HOST-SIDE ORDERING COORDINATE.
-        # It is not a Myo device timestamp.
-        base_sample_index = notification_index * len(samples)
-
-        for offset, sample in enumerate(samples):
-            self.store.append(
-                MYO_EMG_STREAM_ID,
-                sample_index=base_sample_index + offset,
-                host_monotonic_ns=host_monotonic_ns,
-                host_unix_ns=host_unix_ns,
-                values=tuple(float(value) for value in sample),
-            )
+        # Preserve the worker's observation semantics: both decoded EMG samples
+        # belong to the same BLE notification and therefore share the same host
+        # receive timestamps.  Nominal 200 Hz spacing is a later display/
+        # processing interpretation, not raw observation timing.
+        self.store.append_batch(
+            MYO_EMG_STREAM_ID,
+            (
+                StreamSample(
+                    host_monotonic_ns=host_monotonic_ns,
+                    host_unix_ns=host_unix_ns,
+                    values=tuple(float(value) for value in sample),
+                )
+                for sample in samples
+            ),
+        )
 
     def _ingest_imu(self, record: MyoRecord) -> None:
         quaternion = tuple(record["quaternion"])  # type: ignore[arg-type]
@@ -125,7 +101,6 @@ class MyoRecordIngestor:
 
         self.store.append(
             MYO_IMU_STREAM_ID,
-            sample_index=int(record["sample_index"]),
             host_monotonic_ns=int(record["host_monotonic_ns"]),
             host_unix_ns=int(record["host_unix_ns"]),
             values=tuple(

@@ -19,6 +19,7 @@ from assembly.acquisition.BLE.myo_worker import (
     MyoWorker,
     start_myo,
 )
+from assembly.acquisition.runtime.queue_pump import QueuePump
 from assembly.plot.models import SeriesSpec
 from assembly.plot.plot_window import create_plot_window
 from assembly.plot.realtime_provider import BufferedPlotProvider
@@ -198,10 +199,8 @@ def main() -> None:
         retention_seconds=RETENTION_SECONDS,
     )
 
-    ingestor = MyoRecordIngestor(
-        records,
-        store,
-    )
+    ingestor = MyoRecordIngestor(store)
+    queue_pump = QueuePump(records, ingestor.ingest)
 
     provider = BufferedPlotProvider(
         store,
@@ -257,9 +256,7 @@ def main() -> None:
             # No additional acquisition thread is needed for this MVP.
             # ----------------------------------------------------------
 
-            ingestor.drain(
-                max_records=MAX_RECORDS_PER_FRAME
-            )
+            queue_pump.drain(max_items=MAX_RECORDS_PER_FRAME)
 
             # A background hardware failure should terminate this
             # integration instead of leaving a frozen Plot running.

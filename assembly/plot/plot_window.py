@@ -78,6 +78,19 @@ class PlotDataProvider(Protocol):
     ) -> tuple[tuple[SeriesSpec, float], ...]: ...
 
 
+def _relative_display_time(series_window: SeriesWindow) -> list[float]:
+    """Project one SeriesWindow onto the Plot's shared relative x-axis."""
+
+    if not series_window.time_s:
+        return []
+    reference = (
+        series_window.time_s[-1]
+        if series_window.reference_time_s is None
+        else series_window.reference_time_s
+    )
+    return [timestamp - reference for timestamp in series_window.time_s]
+
+
 @dataclass
 class PlotSlot:
     slot_id: int
@@ -192,7 +205,7 @@ class PlotSlot:
             self.signal_view,
             series_window.spec.unit or "value",
         )
-        relative_time = [timestamp - timestamps[-1] for timestamp in timestamps]
+        relative_time = _relative_display_time(series_window)
         display_x, display_y = minmax_downsample(relative_time, processed.values, MAX_DISPLAY_POINTS)
 
         dpg.set_value(self.series_tag, [display_x, display_y])
