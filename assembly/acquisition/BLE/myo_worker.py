@@ -170,6 +170,11 @@ class MyoWorker(threading.Thread):
             self.startup_event.set()
             self.stopped_event.set()
 
+    def request_stop(self) -> None:
+        """Request cooperative shutdown without waiting for cleanup."""
+
+        self.stop_event.set()
+
     def close(self, timeout_s: float = 5.0) -> None:
         """Request cooperative shutdown, wait for cleanup, and surface failure."""
 
@@ -177,7 +182,7 @@ class MyoWorker(threading.Thread):
             raise ValueError("timeout_s must be positive.")
         if threading.current_thread() is self:
             raise RuntimeError("A MyoWorker cannot join itself.")
-        self.stop_event.set()
+        self.request_stop()
         if self.ident is not None:
             self.join(timeout_s)
         if self.is_alive():
