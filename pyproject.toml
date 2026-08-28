@@ -5,6 +5,7 @@ requires-python = ">=3.13"
 dependencies = [
     "bleak>=3.0.2",
     "dearpygui>=2.3.1",
+    "h5py>=3.16.0",
     "jupyterlab>=4.5.7",
     "matplotlib>=3.10.9",
     "numpy>=2.4.6",
@@ -12,6 +13,7 @@ dependencies = [
     "pymyo==2.2.3",
     "pyserial>=3.5",
     "scipy>=1.17.1",
+    "tyro>=1.0.15",
 ]
 
 [dependency-groups]
