@@ -13,8 +13,8 @@ import tyro
 from bleak import BleakScanner
 
 from assembly.acquisition.BLE.myo_ingest import (
-    MYO_STREAM_SCHEMAS,
     MyoRecordIngestor,
+    make_myo_stream_schemas,
 )
 from assembly.acquisition.BLE.myo_worker import MyoRecord, MyoWorker, start_myo
 from assembly.acquisition.runtime.queue_pump import QueuePump
@@ -28,6 +28,7 @@ class Config:
     """Hardware and observation settings for one physical Myo."""
 
     address: str
+    device_id: str = "myo_test"
     tester_mode: TesterMode = "raw"
     capture_seconds: float = 10.0
     scan_timeout_s: float = 10.0
@@ -68,6 +69,8 @@ def _print_store_summary(store: RealtimeStreamStore) -> None:
 def run(config: Config) -> None:
     if not config.address.strip():
         raise ValueError("address must not be empty.")
+    if not config.device_id.strip():
+        raise ValueError("device_id must not be empty.")
     if config.capture_seconds <= 0:
         raise ValueError("capture_seconds must be positive.")
     if min(
@@ -91,11 +94,12 @@ def run(config: Config) -> None:
     store: RealtimeStreamStore | None = None
     pump: QueuePump[MyoRecord] | None = None
     if config.tester_mode == "ingest":
+        schemas = make_myo_stream_schemas(config.device_id)
         store = RealtimeStreamStore(
-            MYO_STREAM_SCHEMAS,
+            schemas,
             retention_seconds=max(30.0, config.capture_seconds + 5.0),
         )
-        ingestor = MyoRecordIngestor(store)
+        ingestor = MyoRecordIngestor(store, config.device_id)
         pump = QueuePump(records, ingestor.ingest)
 
     counts: Counter[str] = Counter()

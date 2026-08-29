@@ -4,10 +4,10 @@ import queue
 import unittest
 
 from assembly.acquisition.BLE.myo_ingest import (
-    MYO_EMG_STREAM_ID,
-    MYO_IMU_STREAM_ID,
-    MYO_STREAM_SCHEMAS,
     MyoRecordIngestor,
+    make_myo_stream_schemas,
+    myo_emg_stream_id,
+    myo_imu_stream_id,
 )
 from assembly.acquisition.runtime.queue_pump import QueuePump
 from assembly.acquisition.runtime.stream_store import (
@@ -181,8 +181,11 @@ class QueuePumpTests(unittest.TestCase):
 
 class MyoRecordIngestorTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.store = RealtimeStreamStore(MYO_STREAM_SCHEMAS)
-        self.ingestor = MyoRecordIngestor(self.store)
+        self.device_id = "arm"
+        self.emg_stream_id = myo_emg_stream_id(self.device_id)
+        self.imu_stream_id = myo_imu_stream_id(self.device_id)
+        self.store = RealtimeStreamStore(make_myo_stream_schemas(self.device_id))
+        self.ingestor = MyoRecordIngestor(self.store, self.device_id)
 
     def test_emg_worker_counter_does_not_define_runtime_index(self) -> None:
         self.ingestor.ingest(
@@ -198,7 +201,7 @@ class MyoRecordIngestorTests(unittest.TestCase):
             }
         )
 
-        rows = self.store.tail_samples(MYO_EMG_STREAM_ID, 10).rows
+        rows = self.store.tail_samples(self.emg_stream_id, 10).rows
         self.assertEqual([row.runtime_index for row in rows], [0, 1])
         self.assertEqual(rows[0].host_monotonic_ns, rows[1].host_monotonic_ns)
         self.assertEqual(rows[1].values[-1], 15.0)
@@ -216,11 +219,35 @@ class MyoRecordIngestorTests(unittest.TestCase):
             }
         )
 
-        row = self.store.latest(MYO_IMU_STREAM_ID)
+        row = self.store.latest(self.imu_stream_id)
         self.assertIsNotNone(row)
         assert row is not None
         self.assertEqual(row.runtime_index, 0)
         self.assertEqual(row.values[-1], 3.0)
+
+    def test_two_myo_ingestors_keep_stream_identity_and_runtime_order_independent(self) -> None:
+        left_schemas = make_myo_stream_schemas("left")
+        right_schemas = make_myo_stream_schemas("right")
+        store = RealtimeStreamStore((*left_schemas, *right_schemas))
+        left = MyoRecordIngestor(store, "left")
+        right = MyoRecordIngestor(store, "right")
+
+        record = {
+            "stream": "emg",
+            "notification_index": 99,
+            "host_monotonic_ns": 10 * NS,
+            "host_unix_ns": 100 * NS,
+            "samples": (tuple(range(8)), tuple(range(8, 16))),
+        }
+        left.ingest(record)
+        right.ingest(record)
+
+        left_rows = store.tail_samples(myo_emg_stream_id("left"), 10).rows
+        right_rows = store.tail_samples(myo_emg_stream_id("right"), 10).rows
+        self.assertEqual([row.runtime_index for row in left_rows], [0, 1])
+        self.assertEqual([row.runtime_index for row in right_rows], [0, 1])
+        self.assertEqual(left_rows[1].values[-1], 15.0)
+        self.assertEqual(right_rows[1].values[-1], 15.0)
 
 
 class AssemblyProviderTests(unittest.TestCase):

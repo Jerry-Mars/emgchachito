@@ -9,10 +9,10 @@ import dearpygui.dearpygui as dpg
 from bleak import BleakScanner
 
 from assembly.acquisition.BLE.myo_ingest import (
-    MYO_EMG_STREAM_ID,
-    MYO_IMU_STREAM_ID,
-    MYO_STREAM_SCHEMAS,
     MyoRecordIngestor,
+    make_myo_stream_schemas,
+    myo_emg_stream_id,
+    myo_imu_stream_id,
 )
 from assembly.acquisition.BLE.myo_worker import (
     MyoRecord,
@@ -33,6 +33,7 @@ from assembly.acquisition.runtime.stream_store import RealtimeStreamStore
 # TODO(HARDWARE):
 # Fill in the BLE address of the physical Myo.
 MYO_ADDRESS = "TODO: YOUR_MYO_BLE_ADDRESS"
+MYO_DEVICE_ID = "main"
 
 SCAN_TIMEOUT_S = 10.0
 CONNECT_TIMEOUT_S = 20.0
@@ -61,6 +62,10 @@ MAX_RECORDS_PER_FRAME = 2048
 # ======================================================================
 # PLOT METADATA
 # ======================================================================
+
+MYO_EMG_STREAM_ID = myo_emg_stream_id(MYO_DEVICE_ID)
+MYO_IMU_STREAM_ID = myo_imu_stream_id(MYO_DEVICE_ID)
+MYO_STREAM_SCHEMAS = make_myo_stream_schemas(MYO_DEVICE_ID)
 
 MYO_PLOT_SERIES: tuple[SeriesSpec, ...] = (
     *tuple(
@@ -199,7 +204,7 @@ def main() -> None:
         retention_seconds=RETENTION_SECONDS,
     )
 
-    ingestor = MyoRecordIngestor(store)
+    ingestor = MyoRecordIngestor(store, MYO_DEVICE_ID)
     queue_pump = QueuePump(records, ingestor.ingest)
 
     provider = BufferedPlotProvider(
