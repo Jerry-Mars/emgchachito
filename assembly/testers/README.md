@@ -14,6 +14,7 @@ Tester 不是 production runtime，也不是完整应用。它们的目标是让
 - `w2_worker_tester.py`
 - `bwt901_worker_tester.py`
 - `recorder_tester.py`
+- `miil_valid_simple.py`：不依赖 acquisition，用确定性的 host-clock boundary 演示 MIIL codebook、动作切换、drop/no_stimulus、stop、interval 查询与 `code_at()` 对齐接口。
 
 Worker tester 当前支持两种模式：
 
