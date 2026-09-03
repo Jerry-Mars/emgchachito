@@ -12,7 +12,12 @@ import tyro
 from assembly.acquisition.runtime.queue_pump import QueuePump
 from assembly.acquisition.runtime.stream_store import RealtimeStreamStore
 from assembly.acquisition.serial.w2_ingest import W2RecordIngestor, make_w2_stream_schema
-from assembly.acquisition.serial.w2_worker import SerialW2Worker, W2Record, W2SerialConfig
+from assembly.acquisition.serial.w2_worker import (
+    SerialW2Worker,
+    W2Record,
+    W2SerialConfig,
+    resolve_w2_config,
+)
 
 TesterMode = Literal["raw", "ingest"]
 
@@ -22,7 +27,6 @@ class Config:
     """Hardware and observation settings for one physical W2."""
 
     port: str
-    device_id: str = "w2_test"
     mode: Literal["emg_raw", "emg_rms", "eeg_raw"] = "emg_raw"
     tester_mode: TesterMode = "raw"
     capture_seconds: float = 10.0
@@ -65,31 +69,32 @@ def run(config: Config) -> None:
     if config.queue_size <= 0:
         raise ValueError("queue_size must be positive.")
 
-    device = W2SerialConfig(
-        device_id=config.device_id,
+    requested = W2SerialConfig(
         port=config.port,
         mode=config.mode,
         nominal_rate_hz=config.nominal_rate_hz,
         baud_rate=config.baud_rate,
         timeout_s=config.serial_timeout_s,
     )
+    device = resolve_w2_config(requested)
+    print(f"Resolved identity: {device.device_name} -> {device.device_id} @ {device.port}")
     records: queue.Queue[W2Record] = queue.Queue(maxsize=config.queue_size)
     worker = SerialW2Worker(device, records)
 
     store: RealtimeStreamStore | None = None
     pump: QueuePump[W2Record] | None = None
     stream_id = make_w2_stream_schema(
-        config.device_id,
-        nominal_rate_hz=config.nominal_rate_hz,
+        device.device_id,
+        nominal_rate_hz=device.nominal_rate_hz,
     ).stream_id
 
     if config.tester_mode == "ingest":
         schema = make_w2_stream_schema(
-            config.device_id,
-            nominal_rate_hz=config.nominal_rate_hz,
+            device.device_id,
+            nominal_rate_hz=device.nominal_rate_hz,
         )
         store = RealtimeStreamStore((schema,), retention_seconds=max(30.0, config.capture_seconds + 5.0))
-        ingestor = W2RecordIngestor(store, config.device_id)
+        ingestor = W2RecordIngestor(store, device.device_id)
         pump = QueuePump(records, ingestor.ingest)
 
     seen = 0

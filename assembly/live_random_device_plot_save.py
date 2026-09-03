@@ -45,9 +45,11 @@ from assembly.acquisition.serial.w2_ingest import (
     w2_stream_id,
 )
 from assembly.acquisition.serial.w2_worker import (
+    ResolvedW2SerialConfig,
     SerialW2Worker,
     W2Record,
     W2SerialConfig,
+    resolve_w2_configs,
 )
 from assembly.plot.models import SeriesSpec
 from assembly.plot.plot_window import create_plot_window
@@ -96,8 +98,8 @@ MYO_DEVICES: tuple[MyoDeviceConfig, ...] = (
 )
 
 W2_DEVICES: tuple[W2SerialConfig, ...] = (
-    W2SerialConfig("w2_1", "COM9"),
-    W2SerialConfig("w2_2", "COM11"),
+    W2SerialConfig("COM9"),
+    W2SerialConfig("COM11"),
 )
 
 BWT901_DEVICES: tuple[BWT901BLEConfig, ...] = (
@@ -149,9 +151,6 @@ def _validate_configs(
     if len(set(myo_addresses)) != len(myo_addresses):
         raise ValueError("Myo BLE addresses must be unique.")
 
-    w2_ids = [config.device_id.casefold() for config in w2s]
-    if len(set(w2_ids)) != len(w2_ids):
-        raise ValueError("W2 device IDs must be unique.")
     w2_ports = [config.port.casefold() for config in w2s]
     if len(set(w2_ports)) != len(w2_ports):
         raise ValueError("Each W2 device must use a different serial port.")
@@ -169,7 +168,7 @@ def _validate_configs(
 
 def _schemas(
     myos: tuple[MyoDeviceConfig, ...],
-    w2s: tuple[W2SerialConfig, ...],
+    w2s: tuple[ResolvedW2SerialConfig, ...],
     bwts: tuple[BWT901BLEConfig, ...],
 ) -> tuple[StreamSchema, ...]:
     schemas: list[StreamSchema] = []
@@ -243,7 +242,7 @@ def _myo_plot_specs(config: MyoDeviceConfig) -> tuple[SeriesSpec, ...]:
     )
 
 
-def _w2_plot_spec(config: W2SerialConfig) -> SeriesSpec:
+def _w2_plot_spec(config: ResolvedW2SerialConfig) -> SeriesSpec:
     stream_id = w2_stream_id(config.device_id)
     signal_kind = {
         "emg_raw": "emg",
@@ -284,7 +283,7 @@ def _bwt901_plot_specs(config: BWT901BLEConfig) -> tuple[SeriesSpec, ...]:
 
 def _plot_specs(
     myos: tuple[MyoDeviceConfig, ...],
-    w2s: tuple[W2SerialConfig, ...],
+    w2s: tuple[ResolvedW2SerialConfig, ...],
     bwts: tuple[BWT901BLEConfig, ...],
 ) -> tuple[SeriesSpec, ...]:
     specs: list[SeriesSpec] = []
@@ -344,9 +343,14 @@ def _print_worker_summary(workers: dict[str, ManagedWorker]) -> None:
 
 def main() -> None:
     myo_configs = MYO_DEVICES
-    w2_configs = W2_DEVICES
+    requested_w2_configs = W2_DEVICES
     bwt_configs = BWT901_DEVICES
-    _validate_configs(myo_configs, w2_configs, bwt_configs)
+    _validate_configs(myo_configs, requested_w2_configs, bwt_configs)
+    w2_configs = resolve_w2_configs(requested_w2_configs)
+    if w2_configs:
+        print("Resolved W2 identities:")
+        for config in w2_configs:
+            print(f"  {config.device_name} -> {config.device_id} @ {config.port}")
 
     schemas = _schemas(myo_configs, w2_configs, bwt_configs)
     series_specs = _plot_specs(myo_configs, w2_configs, bwt_configs)

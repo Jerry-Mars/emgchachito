@@ -15,9 +15,12 @@ from assembly.acquisition.serial.w2_ingest import (
     w2_stream_id,
 )
 from assembly.acquisition.serial.w2_worker import (
+    ResolvedW2SerialConfig,
     SerialW2Worker,
     W2Record,
     W2SerialConfig,
+    resolve_w2_config,
+    w2_device_id_from_name,
 )
 from assembly.plot.models import SeriesSpec
 from assembly.plot.realtime_provider import BufferedPlotProvider
@@ -86,6 +89,21 @@ class FakeSerialBackend:
         return handle
 
 
+
+def make_w2_identity_frame(device_name: str) -> bytes:
+    payload = device_name.encode("utf-8")
+    length_field = len(payload) + 2
+    frame_type = W2CommandBuilder.ADDRESS_DEVICE_NAME
+    return bytes([0xA5, length_field, frame_type, length_field ^ frame_type]) + payload + bytes([0x5A])
+
+
+def resolved(device_name: str, port: str) -> ResolvedW2SerialConfig:
+    return ResolvedW2SerialConfig(
+        device_name=device_name,
+        device_id=w2_device_id_from_name(device_name),
+        port=port,
+    )
+
 def wait_until(predicate, timeout_s: float = 0.5) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -96,10 +114,38 @@ def wait_until(predicate, timeout_s: float = 0.5) -> bool:
 
 
 class W2RuntimeTests(unittest.TestCase):
+    def test_protocol_device_name_derives_stable_device_id_independent_of_port(self) -> None:
+        for port in ("COM7", "COM12"):
+            backend = FakeSerialBackend({port: [make_w2_identity_frame("RunE W2 5")]})
+            config = resolve_w2_config(
+                W2SerialConfig(port),
+                serial_backend=backend,
+                identity_timeout_s=0.1,
+            )
+            self.assertEqual(config.device_name, "RunE W2 5")
+            self.assertEqual(config.device_id, "w2_5")
+            self.assertEqual(config.port, port)
+            self.assertEqual(
+                backend.handles[port].writes,
+                [
+                    W2CommandBuilder.stop_collect(),
+                    W2CommandBuilder.read(W2CommandBuilder.ADDRESS_DEVICE_NAME),
+                ],
+            )
+
+    def test_invalid_protocol_device_name_is_rejected(self) -> None:
+        backend = FakeSerialBackend({"COM7": [make_w2_identity_frame("RunE W2") ]})
+        with self.assertRaisesRegex(ValueError, "device_name"):
+            resolve_w2_config(
+                W2SerialConfig("COM7"),
+                serial_backend=backend,
+                identity_timeout_s=0.1,
+            )
+
     def test_worker_ready_means_serial_and_collect_command_ready_not_first_sample(self) -> None:
         backend = FakeSerialBackend({"COM7": []})
         worker = SerialW2Worker(
-            W2SerialConfig("left", "COM7"),
+            resolved("RunE W2 5", "COM7"),
             serial_backend=backend,
         )
 
@@ -122,7 +168,7 @@ class W2RuntimeTests(unittest.TestCase):
         backend = FakeSerialBackend({"COM7": [frame]})
         records: queue.Queue[W2Record] = queue.Queue()
         worker = SerialW2Worker(
-            W2SerialConfig("left", "COM7"),
+            resolved("RunE W2 5", "COM7"),
             records,
             serial_backend=backend,
         )
@@ -177,8 +223,8 @@ class W2RuntimeTests(unittest.TestCase):
             }
         )
         configs = (
-            W2SerialConfig("left", "COM7"),
-            W2SerialConfig("right", "COM8"),
+            resolved("RunE W2 5", "COM7"),
+            resolved("RunE W2 4", "COM8"),
         )
         schemas = tuple(
             make_w2_stream_schema(
@@ -227,8 +273,8 @@ class W2RuntimeTests(unittest.TestCase):
             pump.drain()
 
         self.assertEqual(store.stream_count, 2)
-        left_rows = store.tail_samples(w2_stream_id("left"), 10).rows
-        right_rows = store.tail_samples(w2_stream_id("right"), 10).rows
+        left_rows = store.tail_samples(w2_stream_id("w2_5"), 10).rows
+        right_rows = store.tail_samples(w2_stream_id("w2_4"), 10).rows
         self.assertEqual(len(left_rows), 2)
         self.assertEqual(len(right_rows), 2)
         self.assertAlmostEqual(left_rows[0].values[0], 10.0)

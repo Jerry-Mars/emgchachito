@@ -26,9 +26,11 @@ from assembly.acquisition.serial.w2_ingest import (
     w2_stream_id,
 )
 from assembly.acquisition.serial.w2_worker import (
+    ResolvedW2SerialConfig,
     SerialW2Worker,
     W2Record,
     W2SerialConfig,
+    resolve_w2_configs,
 )
 from assembly.plot.models import SeriesSpec
 from assembly.plot.plot_window import create_plot_window
@@ -40,8 +42,8 @@ from assembly.save.store_tap import StreamStoreTap
 
 # Edit only this composition-level configuration on the hardware machine.
 W2_DEVICES: tuple[W2SerialConfig, ...] = (
-    W2SerialConfig("w2_1", "COM9"),
-    W2SerialConfig("w2_2", "COM11"),
+    W2SerialConfig("COM9"),
+    W2SerialConfig("COM11"),
 )
 
 STARTUP_TIMEOUT_S = 10.0
@@ -54,15 +56,12 @@ MAX_RECORDS_PER_FRAME = 4096
 def _validate_device_configs(configs: tuple[W2SerialConfig, ...]) -> None:
     if not configs:
         raise ValueError("Configure at least one W2 device.")
-    device_ids = [config.device_id.casefold() for config in configs]
     ports = [config.port.casefold() for config in configs]
-    if len(set(device_ids)) != len(device_ids):
-        raise ValueError("W2 device IDs must be unique.")
     if len(set(ports)) != len(ports):
         raise ValueError("Each W2 device must use a different serial port.")
 
 
-def _plot_spec(config: W2SerialConfig) -> SeriesSpec:
+def _plot_spec(config: ResolvedW2SerialConfig) -> SeriesSpec:
     stream_id = w2_stream_id(config.device_id)
     signal_kind = {
         "emg_raw": "emg",
@@ -97,8 +96,12 @@ def _print_group_state(group: WorkerGroup, workers: dict[str, SerialW2Worker]) -
 
 
 def main() -> None:
-    configs = W2_DEVICES
-    _validate_device_configs(configs)
+    requested_configs = W2_DEVICES
+    _validate_device_configs(requested_configs)
+    configs = resolve_w2_configs(requested_configs)
+    print("Resolved W2 identities:")
+    for config in configs:
+        print(f"  {config.device_name} -> {config.device_id} @ {config.port}")
 
     schemas = tuple(
         make_w2_stream_schema(

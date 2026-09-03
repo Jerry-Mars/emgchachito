@@ -9,7 +9,7 @@ from assembly.acquisition.BLE.bwt901_worker import BWT901BLEConfig
 from assembly.acquisition.BLE.myo_ingest import MyoRecordIngestor, myo_emg_stream_id, myo_imu_stream_id
 from assembly.acquisition.runtime.stream_store import RealtimeStreamStore
 from assembly.acquisition.serial.w2_ingest import W2RecordIngestor, w2_stream_id
-from assembly.acquisition.serial.w2_worker import W2SerialConfig
+from assembly.acquisition.serial.w2_worker import ResolvedW2SerialConfig, W2SerialConfig
 from assembly.live_random_device_plot_save import (
     MyoDeviceConfig,
     _plot_specs,
@@ -24,10 +24,11 @@ from assembly.save.store_tap import StreamStoreTap
 class LiveRandomDevicePlotSaveTests(unittest.TestCase):
     def test_mixed_device_schemas_plot_and_recorder_share_one_runtime(self) -> None:
         myos = (MyoDeviceConfig("arm", "AA:BB:CC:DD:EE:FF"),)
-        w2s = (W2SerialConfig("muscle", "COM9"),)
+        requested_w2s = (W2SerialConfig("COM9"),)
+        w2s = (ResolvedW2SerialConfig("RunE W2 5", "w2_5", "COM9"),)
         bwts = (BWT901BLEConfig("imu", address="11:22:33:44:55:66"),)
 
-        _validate_configs(myos, w2s, bwts)
+        _validate_configs(myos, requested_w2s, bwts)
         schemas = _schemas(myos, w2s, bwts)
         specs = _plot_specs(myos, w2s, bwts)
 
@@ -36,7 +37,7 @@ class LiveRandomDevicePlotSaveTests(unittest.TestCase):
             {
                 myo_emg_stream_id("arm"),
                 myo_imu_stream_id("arm"),
-                w2_stream_id("muscle"),
+                w2_stream_id("w2_5"),
                 "bwt901.imu.imu",
             },
         )
@@ -47,7 +48,7 @@ class LiveRandomDevicePlotSaveTests(unittest.TestCase):
         tapped_store = StreamStoreTap(store, recorder)
 
         myo = MyoRecordIngestor(tapped_store, "arm")  # type: ignore[arg-type]
-        w2 = W2RecordIngestor(tapped_store, "muscle")  # type: ignore[arg-type]
+        w2 = W2RecordIngestor(tapped_store, "w2_5")  # type: ignore[arg-type]
         bwt = BWT901RecordIngestor(tapped_store, "imu")  # type: ignore[arg-type]
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -105,7 +106,7 @@ class LiveRandomDevicePlotSaveTests(unittest.TestCase):
             {
                 myo_emg_stream_id("arm"): 2,
                 myo_imu_stream_id("arm"): 1,
-                w2_stream_id("muscle"): 2,
+                w2_stream_id("w2_5"): 2,
                 "bwt901.imu.imu": 1,
             },
         )

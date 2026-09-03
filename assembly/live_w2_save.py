@@ -15,7 +15,12 @@ from assembly.acquisition.runtime.queue_pump import QueuePump
 from assembly.acquisition.runtime.stream_store import RealtimeStreamStore
 from assembly.acquisition.runtime.worker_group import WorkerGroup
 from assembly.acquisition.serial.w2_ingest import W2RecordIngestor, make_w2_stream_schema
-from assembly.acquisition.serial.w2_worker import SerialW2Worker, W2Record, W2SerialConfig
+from assembly.acquisition.serial.w2_worker import (
+    SerialW2Worker,
+    W2Record,
+    W2SerialConfig,
+    resolve_w2_configs,
+)
 from assembly.save.recorder import H5StreamRecorder
 from assembly.save.save_panel import SavePanel
 from assembly.save.store_tap import StreamStoreTap
@@ -23,8 +28,8 @@ from assembly.save.store_tap import StreamStoreTap
 
 # Edit only this composition-level configuration on the hardware machine.
 W2_DEVICES: tuple[W2SerialConfig, ...] = (
-    W2SerialConfig("w2_1", "COM9"),
-    W2SerialConfig("w2_2", "COM11"),
+    W2SerialConfig("COM9"),
+    W2SerialConfig("COM11"),
 )
 
 STARTUP_TIMEOUT_S = 10.0
@@ -37,10 +42,7 @@ MAX_RECORDS_PER_FRAME = 4096
 def _validate_device_configs(configs: tuple[W2SerialConfig, ...]) -> None:
     if not configs:
         raise ValueError("Configure at least one W2 device.")
-    ids = [config.device_id.casefold() for config in configs]
     ports = [config.port.casefold() for config in configs]
-    if len(set(ids)) != len(ids):
-        raise ValueError("W2 device IDs must be unique.")
     if len(set(ports)) != len(ports):
         raise ValueError("Each W2 device must use a different serial port.")
 
@@ -61,8 +63,12 @@ def _print_group_state(group: WorkerGroup, workers: dict[str, SerialW2Worker]) -
 
 
 def main() -> None:
-    configs = W2_DEVICES
-    _validate_device_configs(configs)
+    requested_configs = W2_DEVICES
+    _validate_device_configs(requested_configs)
+    configs = resolve_w2_configs(requested_configs)
+    print("Resolved W2 identities:")
+    for config in configs:
+        print(f"  {config.device_name} -> {config.device_id} @ {config.port}")
 
     schemas = tuple(
         make_w2_stream_schema(
