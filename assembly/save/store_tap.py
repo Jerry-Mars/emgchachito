@@ -13,13 +13,13 @@ from assembly.acquisition.runtime.stream_store import (
     StreamRow,
     StreamSample,
 )
-from assembly.save.recorder import H5StreamRecorder
+from assembly.save.recorder import StreamRecorder
 
 
 class StreamStoreTap:
     """Delegate commits to a store, optionally mirror committed rows to a recorder."""
 
-    def __init__(self, store: RealtimeStreamStore, recorder: H5StreamRecorder) -> None:
+    def __init__(self, store: RealtimeStreamStore, recorder: StreamRecorder) -> None:
         self.store = store
         self.recorder = recorder
 

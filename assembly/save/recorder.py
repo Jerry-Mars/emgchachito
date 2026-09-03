@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from enum import Enum
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Protocol
 
 import h5py
 import numpy as np
@@ -21,6 +21,36 @@ from assembly.acquisition.runtime.stream_store import StreamRow, StreamSchema
 class RecorderState(str, Enum):
     STOPPED = "stopped"
     RECORDING = "recording"
+
+
+class StreamRecorder(Protocol):
+    """Minimal persistence contract consumed by StreamStoreTap and SavePanel."""
+
+    @property
+    def state(self) -> RecorderState: ...
+
+    @property
+    def is_recording(self) -> bool: ...
+
+    @property
+    def path(self) -> Path | None: ...
+
+    @property
+    def rows_written(self) -> int: ...
+
+    def rows_by_stream(self) -> dict[str, int]: ...
+
+    def start(self, path: str | Path, schemas: Iterable[StreamSchema]) -> Path: ...
+
+    def append(self, stream_id: str, row: StreamRow) -> None: ...
+
+    def append_batch(self, stream_id: str, rows: Iterable[StreamRow]) -> int: ...
+
+    def flush(self) -> None: ...
+
+    def stop(self) -> Path | None: ...
+
+    def close(self) -> Path | None: ...
 
 
 class H5StreamRecorder:

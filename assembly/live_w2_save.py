@@ -21,7 +21,7 @@ from assembly.acquisition.serial.w2_worker import (
     W2SerialConfig,
     resolve_w2_configs,
 )
-from assembly.save.recorder import H5StreamRecorder
+from assembly.save.selectable_recorder import SelectableStreamRecorder
 from assembly.save.save_panel import SavePanel
 from assembly.save.store_tap import StreamStoreTap
 
@@ -78,7 +78,7 @@ def main() -> None:
         for config in configs
     )
     store = RealtimeStreamStore(schemas, retention_seconds=RETENTION_SECONDS)
-    recorder = H5StreamRecorder()
+    recorder = SelectableStreamRecorder()
     tapped_store = StreamStoreTap(store, recorder)
 
     workers: dict[str, SerialW2Worker] = {}

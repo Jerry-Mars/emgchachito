@@ -32,7 +32,7 @@ from assembly.acquisition.runtime.stream_store import RealtimeStreamStore
 from assembly.plot.models import SeriesSpec
 from assembly.plot.plot_window import create_plot_window
 from assembly.plot.realtime_provider import BufferedPlotProvider
-from assembly.save.recorder import H5StreamRecorder
+from assembly.save.selectable_recorder import SelectableStreamRecorder
 from assembly.save.save_panel import SavePanel
 from assembly.save.store_tap import StreamStoreTap
 
@@ -185,7 +185,7 @@ def main() -> None:
         MYO_STREAM_SCHEMAS,
         retention_seconds=RETENTION_SECONDS,
     )
-    recorder = H5StreamRecorder()
+    recorder = SelectableStreamRecorder()
     tapped_store = StreamStoreTap(store, recorder)
 
     # MyoRecordIngestor already owns the Myo-specific normalization semantics.

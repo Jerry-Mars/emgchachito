@@ -21,3 +21,6 @@ captures/
 
 .DS_Store
 Thumbs.db
+
+.venv-win/
+.venv-wsl/

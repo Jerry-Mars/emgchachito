@@ -35,7 +35,7 @@ from assembly.acquisition.serial.w2_worker import (
 from assembly.plot.models import SeriesSpec
 from assembly.plot.plot_window import create_plot_window
 from assembly.plot.realtime_provider import BufferedPlotProvider
-from assembly.save.recorder import H5StreamRecorder
+from assembly.save.selectable_recorder import SelectableStreamRecorder
 from assembly.save.save_panel import SavePanel
 from assembly.save.store_tap import StreamStoreTap
 
@@ -111,7 +111,7 @@ def main() -> None:
         for config in configs
     )
     store = RealtimeStreamStore(schemas, retention_seconds=RETENTION_SECONDS)
-    recorder = H5StreamRecorder()
+    recorder = SelectableStreamRecorder()
     tapped_store = StreamStoreTap(store, recorder)
 
     workers: dict[str, SerialW2Worker] = {}
