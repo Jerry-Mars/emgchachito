@@ -1,0 +1,477 @@
+{
+  "created_local": "2026-09-03T14:42:14.080629+08:00",
+  "test_context": {
+    "machine": "",
+    "usb_setup": "",
+    "run_note": ""
+  },
+  "physical_labels": {},
+  "serial_inventory": [
+    {
+      "device": "COM13",
+      "description": "USB-SERIAL CH340 (COM13)",
+      "hwid": "USB VID:PID=1A86:7523 SER= LOCATION=1-4.2.1",
+      "vid": 6790,
+      "pid": 29987,
+      "serial_number": "",
+      "location": "1-4.2.1",
+      "manufacturer": "wch.cn",
+      "product": null,
+      "interface": null
+    },
+    {
+      "device": "COM10",
+      "description": "USB-SERIAL CH340 (COM10)",
+      "hwid": "USB VID:PID=1A86:7523 SER= LOCATION=1-4.1.1",
+      "vid": 6790,
+      "pid": 29987,
+      "serial_number": "",
+      "location": "1-4.1.1",
+      "manufacturer": "wch.cn",
+      "product": null,
+      "interface": null
+    },
+    {
+      "device": "COM11",
+      "description": "USB-SERIAL CH340 (COM11)",
+      "hwid": "USB VID:PID=1A86:7523 SER= LOCATION=1-4.1.2",
+      "vid": 6790,
+      "pid": 29987,
+      "serial_number": "",
+      "location": "1-4.1.2",
+      "manufacturer": "wch.cn",
+      "product": null,
+      "interface": null
+    },
+    {
+      "device": "COM12",
+      "description": "USB-SERIAL CH340 (COM12)",
+      "hwid": "USB VID:PID=1A86:7523 SER= LOCATION=1-4.1.3",
+      "vid": 6790,
+      "pid": 29987,
+      "serial_number": "",
+      "location": "1-4.1.3",
+      "manufacturer": "wch.cn",
+      "product": null,
+      "interface": null
+    },
+    {
+      "device": "COM9",
+      "description": "USB-SERIAL CH340 (COM9)",
+      "hwid": "USB VID:PID=1A86:7523 SER= LOCATION=1-4.1.4",
+      "vid": 6790,
+      "pid": 29987,
+      "serial_number": "",
+      "location": "1-4.1.4",
+      "manufacturer": "wch.cn",
+      "product": null,
+      "interface": null
+    }
+  ],
+  "probe_ports": [
+    "COM9",
+    "COM10",
+    "COM11",
+    "COM12",
+    "COM13"
+  ],
+  "settings": {
+    "baud_rate": 256000,
+    "serial_timeout_s": 0.05,
+    "response_window_s": 1.0,
+    "idle_after_first_byte_s": 0.15
+  },
+  "results": {
+    "COM9": {
+      "port": "COM9",
+      "queries": {
+        "software": {
+          "address": 2,
+          "address_hex": "0x02",
+          "command_hex": "AA 03 81 02 3B BB",
+          "raw_hex": "A5 0A 02 08 57 32 5F 56 31 2E 36 00 5A",
+          "raw_len": 13,
+          "response_sha256": "380e702aafab362810b4cca042a891e84d547a90e310eada79e72bd44cc3c50f",
+          "frames": [
+            {
+              "frame_hex": "A5 0A 02 08 57 32 5F 56 31 2E 36 00 5A",
+              "length_field": 10,
+              "frame_type": 2,
+              "frame_type_hex": "0x02",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "57 32 5F 56 31 2E 36 00",
+              "payload_ascii": "W2_V1.6",
+              "payload_utf8": "W2_V1.6"
+            }
+          ],
+          "unparsed_hex": ""
+        },
+        "device_name": {
+          "address": 3,
+          "address_hex": "0x03",
+          "command_hex": "AA 03 81 03 3A BB",
+          "raw_hex": "A5 0B 03 08 52 75 6E 45 20 57 32 20 32 5A",
+          "raw_len": 14,
+          "response_sha256": "776ca1edca1ed87e50112f6fdb10333ecc3495e6405d3ed45edbcbcf343a648a",
+          "frames": [
+            {
+              "frame_hex": "A5 0B 03 08 52 75 6E 45 20 57 32 20 32 5A",
+              "length_field": 11,
+              "frame_type": 3,
+              "frame_type_hex": "0x03",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "52 75 6E 45 20 57 32 20 32",
+              "payload_ascii": "RunE W2 2",
+              "payload_utf8": "RunE W2 2"
+            }
+          ],
+          "unparsed_hex": ""
+        },
+        "hardware_version": {
+          "address": 29,
+          "address_hex": "0x1D",
+          "command_hex": "AA 03 81 1D 24 BB",
+          "raw_hex": "A5 03 1D 1E 03 5A",
+          "raw_len": 6,
+          "response_sha256": "5f5a80074ae43b6228c6d4390ac895d6cc5f9fa21761d0db7c24703bdbc7809a",
+          "frames": [
+            {
+              "frame_hex": "A5 03 1D 1E 03 5A",
+              "length_field": 3,
+              "frame_type": 29,
+              "frame_type_hex": "0x1D",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "03",
+              "payload_ascii": ".",
+              "payload_utf8": "\u0003"
+            }
+          ],
+          "unparsed_hex": ""
+        }
+      },
+      "error": null,
+      "stop_collect": {
+        "command_hex": "AA 0C 80 11 00 00 00 00 00 00 00 00 00 26 BB",
+        "response_hex": ""
+      }
+    },
+    "COM10": {
+      "port": "COM10",
+      "queries": {
+        "software": {
+          "address": 2,
+          "address_hex": "0x02",
+          "command_hex": "AA 03 81 02 3B BB",
+          "raw_hex": "A5 0A 02 08 57 32 5F 56 31 2E 36 00 5A",
+          "raw_len": 13,
+          "response_sha256": "380e702aafab362810b4cca042a891e84d547a90e310eada79e72bd44cc3c50f",
+          "frames": [
+            {
+              "frame_hex": "A5 0A 02 08 57 32 5F 56 31 2E 36 00 5A",
+              "length_field": 10,
+              "frame_type": 2,
+              "frame_type_hex": "0x02",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "57 32 5F 56 31 2E 36 00",
+              "payload_ascii": "W2_V1.6",
+              "payload_utf8": "W2_V1.6"
+            }
+          ],
+          "unparsed_hex": ""
+        },
+        "device_name": {
+          "address": 3,
+          "address_hex": "0x03",
+          "command_hex": "AA 03 81 03 3A BB",
+          "raw_hex": "A5 0B 03 08 52 75 6E 45 20 57 32 20 35 5A",
+          "raw_len": 14,
+          "response_sha256": "c08f8e2f3debf30c19534ecdb9e788b368e5e255c55574cf57381975312dcbc1",
+          "frames": [
+            {
+              "frame_hex": "A5 0B 03 08 52 75 6E 45 20 57 32 20 35 5A",
+              "length_field": 11,
+              "frame_type": 3,
+              "frame_type_hex": "0x03",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "52 75 6E 45 20 57 32 20 35",
+              "payload_ascii": "RunE W2 5",
+              "payload_utf8": "RunE W2 5"
+            }
+          ],
+          "unparsed_hex": ""
+        },
+        "hardware_version": {
+          "address": 29,
+          "address_hex": "0x1D",
+          "command_hex": "AA 03 81 1D 24 BB",
+          "raw_hex": "A5 03 1D 1E 03 5A",
+          "raw_len": 6,
+          "response_sha256": "5f5a80074ae43b6228c6d4390ac895d6cc5f9fa21761d0db7c24703bdbc7809a",
+          "frames": [
+            {
+              "frame_hex": "A5 03 1D 1E 03 5A",
+              "length_field": 3,
+              "frame_type": 29,
+              "frame_type_hex": "0x1D",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "03",
+              "payload_ascii": ".",
+              "payload_utf8": "\u0003"
+            }
+          ],
+          "unparsed_hex": ""
+        }
+      },
+      "error": null,
+      "stop_collect": {
+        "command_hex": "AA 0C 80 11 00 00 00 00 00 00 00 00 00 26 BB",
+        "response_hex": ""
+      }
+    },
+    "COM11": {
+      "port": "COM11",
+      "queries": {
+        "software": {
+          "address": 2,
+          "address_hex": "0x02",
+          "command_hex": "AA 03 81 02 3B BB",
+          "raw_hex": "A5 0A 02 08 57 32 5F 56 31 2E 36 00 5A",
+          "raw_len": 13,
+          "response_sha256": "380e702aafab362810b4cca042a891e84d547a90e310eada79e72bd44cc3c50f",
+          "frames": [
+            {
+              "frame_hex": "A5 0A 02 08 57 32 5F 56 31 2E 36 00 5A",
+              "length_field": 10,
+              "frame_type": 2,
+              "frame_type_hex": "0x02",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "57 32 5F 56 31 2E 36 00",
+              "payload_ascii": "W2_V1.6",
+              "payload_utf8": "W2_V1.6"
+            }
+          ],
+          "unparsed_hex": ""
+        },
+        "device_name": {
+          "address": 3,
+          "address_hex": "0x03",
+          "command_hex": "AA 03 81 03 3A BB",
+          "raw_hex": "A5 0B 03 08 52 75 6E 45 20 57 32 20 34 5A",
+          "raw_len": 14,
+          "response_sha256": "ccaf3b218f32f53ed5f36646a26c522fc6c2659b28f080388fa6c43c9e12a2a2",
+          "frames": [
+            {
+              "frame_hex": "A5 0B 03 08 52 75 6E 45 20 57 32 20 34 5A",
+              "length_field": 11,
+              "frame_type": 3,
+              "frame_type_hex": "0x03",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "52 75 6E 45 20 57 32 20 34",
+              "payload_ascii": "RunE W2 4",
+              "payload_utf8": "RunE W2 4"
+            }
+          ],
+          "unparsed_hex": ""
+        },
+        "hardware_version": {
+          "address": 29,
+          "address_hex": "0x1D",
+          "command_hex": "AA 03 81 1D 24 BB",
+          "raw_hex": "A5 03 1D 1E 03 5A",
+          "raw_len": 6,
+          "response_sha256": "5f5a80074ae43b6228c6d4390ac895d6cc5f9fa21761d0db7c24703bdbc7809a",
+          "frames": [
+            {
+              "frame_hex": "A5 03 1D 1E 03 5A",
+              "length_field": 3,
+              "frame_type": 29,
+              "frame_type_hex": "0x1D",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "03",
+              "payload_ascii": ".",
+              "payload_utf8": "\u0003"
+            }
+          ],
+          "unparsed_hex": ""
+        }
+      },
+      "error": null,
+      "stop_collect": {
+        "command_hex": "AA 0C 80 11 00 00 00 00 00 00 00 00 00 26 BB",
+        "response_hex": ""
+      }
+    },
+    "COM12": {
+      "port": "COM12",
+      "queries": {
+        "software": {
+          "address": 2,
+          "address_hex": "0x02",
+          "command_hex": "AA 03 81 02 3B BB",
+          "raw_hex": "A5 0A 02 08 57 32 5F 56 31 2E 36 00 5A",
+          "raw_len": 13,
+          "response_sha256": "380e702aafab362810b4cca042a891e84d547a90e310eada79e72bd44cc3c50f",
+          "frames": [
+            {
+              "frame_hex": "A5 0A 02 08 57 32 5F 56 31 2E 36 00 5A",
+              "length_field": 10,
+              "frame_type": 2,
+              "frame_type_hex": "0x02",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "57 32 5F 56 31 2E 36 00",
+              "payload_ascii": "W2_V1.6",
+              "payload_utf8": "W2_V1.6"
+            }
+          ],
+          "unparsed_hex": ""
+        },
+        "device_name": {
+          "address": 3,
+          "address_hex": "0x03",
+          "command_hex": "AA 03 81 03 3A BB",
+          "raw_hex": "A5 0B 03 08 52 75 6E 45 20 57 32 20 33 5A",
+          "raw_len": 14,
+          "response_sha256": "2229ca71c2baa30def85ed1678391aac8fd5d78649ed0c6c75a7975a0ba4647a",
+          "frames": [
+            {
+              "frame_hex": "A5 0B 03 08 52 75 6E 45 20 57 32 20 33 5A",
+              "length_field": 11,
+              "frame_type": 3,
+              "frame_type_hex": "0x03",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "52 75 6E 45 20 57 32 20 33",
+              "payload_ascii": "RunE W2 3",
+              "payload_utf8": "RunE W2 3"
+            }
+          ],
+          "unparsed_hex": ""
+        },
+        "hardware_version": {
+          "address": 29,
+          "address_hex": "0x1D",
+          "command_hex": "AA 03 81 1D 24 BB",
+          "raw_hex": "A5 03 1D 1E 03 5A",
+          "raw_len": 6,
+          "response_sha256": "5f5a80074ae43b6228c6d4390ac895d6cc5f9fa21761d0db7c24703bdbc7809a",
+          "frames": [
+            {
+              "frame_hex": "A5 03 1D 1E 03 5A",
+              "length_field": 3,
+              "frame_type": 29,
+              "frame_type_hex": "0x1D",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "03",
+              "payload_ascii": ".",
+              "payload_utf8": "\u0003"
+            }
+          ],
+          "unparsed_hex": ""
+        }
+      },
+      "error": null,
+      "stop_collect": {
+        "command_hex": "AA 0C 80 11 00 00 00 00 00 00 00 00 00 26 BB",
+        "response_hex": ""
+      }
+    },
+    "COM13": {
+      "port": "COM13",
+      "queries": {
+        "software": {
+          "address": 2,
+          "address_hex": "0x02",
+          "command_hex": "AA 03 81 02 3B BB",
+          "raw_hex": "A5 0A 02 08 57 32 5F 56 31 2E 36 00 5A A5 09 0B 02 00 00 00 00 00 00 38 5A",
+          "raw_len": 25,
+          "response_sha256": "e76999f6e9c068a2e0697d4b7cb06d9583d2d8516cd695f039e2612c56bc8b50",
+          "frames": [
+            {
+              "frame_hex": "A5 0A 02 08 57 32 5F 56 31 2E 36 00 5A",
+              "length_field": 10,
+              "frame_type": 2,
+              "frame_type_hex": "0x02",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "57 32 5F 56 31 2E 36 00",
+              "payload_ascii": "W2_V1.6",
+              "payload_utf8": "W2_V1.6"
+            },
+            {
+              "frame_hex": "A5 09 0B 02 00 00 00 00 00 00 38 5A",
+              "length_field": 9,
+              "frame_type": 11,
+              "frame_type_hex": "0x0B",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "00 00 00 00 00 00 38",
+              "payload_ascii": "8",
+              "payload_utf8": "8"
+            }
+          ],
+          "unparsed_hex": ""
+        },
+        "device_name": {
+          "address": 3,
+          "address_hex": "0x03",
+          "command_hex": "AA 03 81 03 3A BB",
+          "raw_hex": "A5 0B 03 08 52 75 6E 45 20 57 32 20 31 5A",
+          "raw_len": 14,
+          "response_sha256": "e552cfc4f0a36d31dff097df7134e9de251f4fe61e40698a8ab5dbbe25ea36cf",
+          "frames": [
+            {
+              "frame_hex": "A5 0B 03 08 52 75 6E 45 20 57 32 20 31 5A",
+              "length_field": 11,
+              "frame_type": 3,
+              "frame_type_hex": "0x03",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "52 75 6E 45 20 57 32 20 31",
+              "payload_ascii": "RunE W2 1",
+              "payload_utf8": "RunE W2 1"
+            }
+          ],
+          "unparsed_hex": ""
+        },
+        "hardware_version": {
+          "address": 29,
+          "address_hex": "0x1D",
+          "command_hex": "AA 03 81 1D 24 BB",
+          "raw_hex": "A5 03 1D 1E 03 5A",
+          "raw_len": 6,
+          "response_sha256": "5f5a80074ae43b6228c6d4390ac895d6cc5f9fa21761d0db7c24703bdbc7809a",
+          "frames": [
+            {
+              "frame_hex": "A5 03 1D 1E 03 5A",
+              "length_field": 3,
+              "frame_type": 29,
+              "frame_type_hex": "0x1D",
+              "checksum_ok": true,
+              "tail_ok": true,
+              "payload_hex": "03",
+              "payload_ascii": ".",
+              "payload_utf8": "\u0003"
+            }
+          ],
+          "unparsed_hex": ""
+        }
+      },
+      "error": null,
+      "stop_collect": {
+        "command_hex": "AA 0C 80 11 00 00 00 00 00 00 00 00 00 26 BB",
+        "response_hex": ""
+      }
+    }
+  }
+}
