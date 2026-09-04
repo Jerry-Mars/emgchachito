@@ -363,6 +363,19 @@ class SessionState(str, Enum):
     PENDING_SAVE = "pending_save"
 
 
+MIIL_ACTION_COLORS: tuple[tuple[int, int, int, int], ...] = (
+    (40, 120, 200, 255),
+    (38, 145, 100, 255),
+    (190, 110, 35, 255),
+    (135, 85, 190, 255),
+    (185, 70, 105, 255),
+    (35, 145, 155, 255),
+    (155, 125, 35, 255),
+    (90, 105, 190, 255),
+    (155, 75, 55, 255),
+)
+
+
 class IntegratedSaveMIILPanel:
     """Composition-only coordinator for streaming Recorder + manual MIIL.
 
@@ -396,6 +409,9 @@ class IntegratedSaveMIILPanel:
         self._configuration_dirty = False
         self._editor_actions = list(self.miil.actions)
         self._history_signature: tuple[tuple[object, ...], ...] = ()
+        self._action_theme_tags: dict[int, tuple[str, str]] = {}
+        self._control_state_signature: tuple[object, ...] | None = None
+        self._visual_state_signature: tuple[object, ...] | None = None
 
         self._staging_root: Path | None = None
         self._staging_data_path: Path | None = None
@@ -412,6 +428,7 @@ class IntegratedSaveMIILPanel:
         self.discard_tag = f"{tag_prefix}.discard"
         self.status_tag = f"{tag_prefix}.status"
         self.current_tag = f"{tag_prefix}.current"
+        self.shortcut_hint_tag = f"{tag_prefix}.shortcut_hint"
         self.rows_tag = f"{tag_prefix}.rows"
         self.path_tag = f"{tag_prefix}.path"
         self.pending_tag = f"{tag_prefix}.pending"
@@ -422,8 +439,10 @@ class IntegratedSaveMIILPanel:
         self.action_buttons_tag = f"{tag_prefix}.action_buttons"
         self.no_stimulus_tag = f"{tag_prefix}.no_stimulus"
         self.drop_tag = f"{tag_prefix}.drop"
+        self.latest_history_tag = f"{tag_prefix}.latest_history"
         self.history_tag = f"{tag_prefix}.history"
         self.discard_modal_tag = f"{tag_prefix}.discard_modal"
+        self.keyboard_handler_tag = f"{tag_prefix}.keyboard_handlers"
 
     def build(self) -> None:
         dpg.add_text("Recording Session + Manual Instruction Interval Labeling (MIIL)")
@@ -499,6 +518,10 @@ class IntegratedSaveMIILPanel:
         dpg.add_separator()
         dpg.add_text("MIIL Operator Console")
         dpg.add_text("", tag=self.current_tag)
+        dpg.add_text(
+            "Keyboard: 0 = No Stimulus; configured action codes 1-9 can be selected directly.",
+            tag=self.shortcut_hint_tag,
+        )
         with dpg.child_window(
             tag=self.action_buttons_tag, width=-1, height=62, horizontal_scrollbar=True
         ):
@@ -518,6 +541,7 @@ class IntegratedSaveMIILPanel:
             )
 
         dpg.add_text("Interval History")
+        dpg.add_text("Latest Event: -", tag=self.latest_history_tag)
         with dpg.child_window(
             tag=self.history_tag, width=-1, height=175, horizontal_scrollbar=True
         ):
@@ -541,6 +565,7 @@ class IntegratedSaveMIILPanel:
                     width=100,
                 )
 
+        self._build_keyboard_handlers()
         self._rebuild_editor()
         self._rebuild_action_buttons()
         self.refresh(force_history=True)
@@ -558,6 +583,7 @@ class IntegratedSaveMIILPanel:
         )
         dpg.set_value(self.rows_tag, f"Rows written: {self.recorder.rows_written}")
         dpg.set_value(self.preview_tag, self._output_preview_text())
+        dpg.set_value(self.shortcut_hint_tag, self._shortcut_hint_text())
 
         if self.session_state is SessionState.RECORDING:
             output_text = "Staging output: -" if self._staging_data_path is None else f"Staging output: {self._staging_data_path}"
@@ -589,10 +615,24 @@ class IntegratedSaveMIILPanel:
             else "Actions applied.",
         )
 
+        self._refresh_control_states()
+        self._refresh_action_visuals()
+        self._refresh_history(force=force_history)
+
+    def _refresh_control_states(self, *, force: bool = False) -> None:
         idle = self.session_state is SessionState.IDLE
         recording = self.session_state is SessionState.RECORDING
         pending = self.session_state is SessionState.PENDING_SAVE
         running = self.miil.state is MIILState.RUNNING
+        signature = (
+            self.session_state,
+            self.miil.state,
+            len(self._editor_actions),
+            tuple(action.code for action in self.miil.actions),
+        )
+        if not force and signature == self._control_state_signature:
+            return
+        self._control_state_signature = signature
 
         dpg.configure_item(self.directory_tag, enabled=idle)
         dpg.configure_item(self.format_tag, enabled=idle)
@@ -601,9 +641,9 @@ class IntegratedSaveMIILPanel:
         dpg.configure_item(self.stop_tag, enabled=recording)
         dpg.configure_item(self.save_tag, enabled=pending)
         dpg.configure_item(self.discard_tag, enabled=pending)
-
         dpg.configure_item(self.add_action_tag, enabled=idle)
         dpg.configure_item(self.apply_actions_tag, enabled=idle)
+
         for index in range(len(self._editor_actions)):
             for field in ("code", "label", "remove"):
                 tag = self._editor_tag(index, field)
@@ -615,8 +655,6 @@ class IntegratedSaveMIILPanel:
                 dpg.configure_item(tag, enabled=recording and running)
         dpg.configure_item(self.no_stimulus_tag, enabled=recording and running)
         dpg.configure_item(self.drop_tag, enabled=recording and running)
-
-        self._refresh_history(force=force_history)
 
     def shutdown_preserving_staging(self) -> None:
         """Stop an active candidate without implicitly saving or discarding it."""
@@ -798,6 +836,7 @@ class IntegratedSaveMIILPanel:
         self._editor_actions.append(MIILAction(f"action_{code}", f"Action {code}", code))
         self._configuration_dirty = True
         self._rebuild_editor()
+        self._control_state_signature = None
         self.refresh()
 
     def _on_remove_action(self, _sender, _app_data, index) -> None:
@@ -809,6 +848,7 @@ class IntegratedSaveMIILPanel:
             del self._editor_actions[index]
             self._configuration_dirty = True
             self._rebuild_editor()
+            self._control_state_signature = None
             self.refresh()
 
     def _on_editor_changed(self, *_args) -> None:
@@ -879,15 +919,98 @@ class IntegratedSaveMIILPanel:
         if not dpg.does_item_exist(self.action_buttons_tag):
             return
         dpg.delete_item(self.action_buttons_tag, children_only=True)
+        for normal_theme, active_theme in self._action_theme_tags.values():
+            for theme_tag in (normal_theme, active_theme):
+                if dpg.does_item_exist(theme_tag):
+                    dpg.delete_item(theme_tag)
+        self._action_theme_tags = {}
+        self._visual_state_signature = None
+        self._control_state_signature = None
         with dpg.group(horizontal=True, parent=self.action_buttons_tag):
-            for action in self.miil.actions:
+            for index, action in enumerate(self.miil.actions):
                 dpg.add_button(
-                    label=f"{action.label} ({action.code})",
+                    label=self._action_button_label(action),
                     tag=self._runtime_action_tag(action.code),
                     user_data=action.code,
                     callback=self._on_action,
-                    width=max(120, min(210, 32 + 9 * len(action.label))),
+                    width=max(130, min(230, 48 + 9 * len(action.label))),
+                    height=34,
                 )
+                normal_theme, active_theme = self._create_action_themes(
+                    action.code, MIIL_ACTION_COLORS[index % len(MIIL_ACTION_COLORS)]
+                )
+                self._action_theme_tags[action.code] = (normal_theme, active_theme)
+                dpg.bind_item_theme(self._runtime_action_tag(action.code), normal_theme)
+        self._refresh_action_visuals(force=True)
+        self._refresh_control_states(force=True)
+
+    def _action_button_label(self, action: MIILAction) -> str:
+        shortcut = f" [{action.code}]" if 1 <= action.code <= 9 else ""
+        return f"{action.label}{shortcut}  (code {action.code})"
+
+    def _create_action_themes(
+        self, code: int, color: tuple[int, int, int, int]
+    ) -> tuple[str, str]:
+        normal_tag = f"{self.prefix}.action_theme.{code}.normal"
+        active_tag = f"{self.prefix}.action_theme.{code}.active"
+        for tag in (normal_tag, active_tag):
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
+
+        hovered = self._scale_rgb(color, 1.16)
+        active = self._scale_rgb(color, 1.35)
+        active_hovered = self._scale_rgb(color, 1.5)
+        with dpg.theme(tag=normal_tag):
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button, color)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, hovered)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, active)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 6)
+        with dpg.theme(tag=active_tag):
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button, active)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, active_hovered)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, active_hovered)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 6)
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 2)
+        return normal_tag, active_tag
+
+    def _refresh_action_visuals(self, *, force: bool = False) -> None:
+        active_code = self.miil.current_code if self.miil.state is MIILState.RUNNING else None
+        signature = (self.miil.state, active_code, tuple(action.code for action in self.miil.actions))
+        if not force and signature == self._visual_state_signature:
+            return
+        self._visual_state_signature = signature
+        current_color = (190, 200, 215, 255)
+        if active_code == -1:
+            current_color = (235, 95, 95, 255)
+        elif active_code == 0 and self.miil.state is MIILState.RUNNING:
+            current_color = (220, 190, 75, 255)
+        for index, action in enumerate(self.miil.actions):
+            if action.code == active_code:
+                current_color = self._scale_rgb(
+                    MIIL_ACTION_COLORS[index % len(MIIL_ACTION_COLORS)], 1.45
+                )
+            themes = self._action_theme_tags.get(action.code)
+            tag = self._runtime_action_tag(action.code)
+            if themes is None or not dpg.does_item_exist(tag):
+                continue
+            normal_theme, active_theme = themes
+            dpg.bind_item_theme(tag, active_theme if action.code == active_code else normal_theme)
+        if dpg.does_item_exist(self.current_tag):
+            dpg.configure_item(self.current_tag, color=current_color)
+
+    @staticmethod
+    def _scale_rgb(
+        color: tuple[int, int, int, int], factor: float
+    ) -> tuple[int, int, int, int]:
+        red, green, blue, alpha = color
+        return (
+            min(255, int(red * factor)),
+            min(255, int(green * factor)),
+            min(255, int(blue * factor)),
+            alpha,
+        )
 
     def _refresh_history(self, *, force: bool = False) -> None:
         if not dpg.does_item_exist(self.history_tag):
@@ -908,6 +1031,7 @@ class IntegratedSaveMIILPanel:
         self._history_signature = signature
         dpg.delete_item(self.history_tag, children_only=True)
         if not rows:
+            dpg.set_value(self.latest_history_tag, "Latest Event: -")
             return
         origin_ns = int(rows[0]["start_monotonic_ns"])
         for row in rows:
@@ -919,6 +1043,94 @@ class IntegratedSaveMIILPanel:
                 f"{row['label']} | {start:.3f} -> {end} s | {row['status']}",
                 parent=self.history_tag,
             )
+        latest = rows[-1]
+        latest_start = (int(latest["start_monotonic_ns"]) - origin_ns) / 1e9
+        latest_end_ns = latest["end_monotonic_ns"]
+        latest_end = (
+            "..."
+            if latest_end_ns is None
+            else f"{(int(latest_end_ns) - origin_ns) / 1e9:.3f}"
+        )
+        dpg.set_value(
+            self.latest_history_tag,
+            f"Latest Event: #{latest['event_index']} | code {latest['stimulus_code']} | "
+            f"{latest['label']} | {latest_start:.3f} -> {latest_end} s | {latest['status']}",
+        )
+        self._scroll_history_to_latest()
+
+    def _scroll_history_to_latest(self) -> None:
+        try:
+            dpg.set_y_scroll(self.history_tag, dpg.get_y_scroll_max(self.history_tag))
+        except (RuntimeError, SystemError):
+            pass
+
+    def _shortcut_hint_text(self) -> str:
+        shortcuts = ["0 = No Stimulus"]
+        shortcuts.extend(
+            f"{action.code} = {action.label}"
+            for action in self.miil.actions
+            if 1 <= action.code <= 9
+        )
+        return "Keyboard shortcuts: " + " | ".join(shortcuts)
+
+    def _build_keyboard_handlers(self) -> None:
+        if dpg.does_item_exist(self.keyboard_handler_tag):
+            dpg.delete_item(self.keyboard_handler_tag)
+        with dpg.handler_registry(tag=self.keyboard_handler_tag):
+            for digit in range(10):
+                for key_name in (f"mvKey_{digit}", f"mvKey_NumPad{digit}"):
+                    key = getattr(dpg, key_name, None)
+                    if key is not None:
+                        dpg.add_key_press_handler(
+                            key=key,
+                            callback=self._on_digit_shortcut,
+                            user_data=digit,
+                        )
+
+    def _on_digit_shortcut(self, _sender=None, _app_data=None, user_data=None) -> None:
+        if self.session_state is not SessionState.RECORDING or self.miil.state is not MIILState.RUNNING:
+            return
+        if self._keyboard_shortcut_blocked():
+            return
+        code = int(user_data)
+        if code == 0:
+            self._last_message = self.miil.select_no_stimulus(capture_host_boundary())
+        else:
+            self._last_message = self.miil.select_action(code, capture_host_boundary())
+        self.refresh(force_history=True)
+
+    @staticmethod
+    def _keyboard_shortcut_blocked() -> bool:
+        for modifier_names in (
+            ("mvKey_Control", "mvKey_LControl", "mvKey_RControl"),
+            ("mvKey_Shift", "mvKey_LShift", "mvKey_RShift"),
+            ("mvKey_LAlt", "mvKey_RAlt"),
+        ):
+            for name in modifier_names:
+                key = getattr(dpg, name, None)
+                if key is not None and dpg.is_key_down(key):
+                    return True
+        try:
+            focused = dpg.get_focused_item()
+        except (RuntimeError, SystemError):
+            return False
+        if not focused:
+            return False
+        try:
+            item_type = str(dpg.get_item_type(focused))
+        except (RuntimeError, SystemError):
+            return False
+        return any(
+            token in item_type
+            for token in (
+                "mvInput",
+                "mvDrag",
+                "mvSlider",
+                "mvCombo",
+                "mvCheckbox",
+                "mvRadioButton",
+            )
+        )
 
     def _output_preview_text(self) -> str:
         try:
