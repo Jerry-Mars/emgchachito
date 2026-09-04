@@ -73,10 +73,13 @@ class MIILControllerTests(unittest.TestCase):
         miil.start(at(0.0))
         miil.select_action(2, at(2.0))
         miil.drop_current(at(5.0))
+        self.assertEqual(miil.current_action, "flex")
+        self.assertEqual(miil.current_code, INVALID_STIMULUS_CODE)
         miil.select_no_stimulus(at(8.0))
 
         self.assertEqual(miil.code_at(3 * NS), INVALID_STIMULUS_CODE)
         self.assertEqual(miil.code_at(7 * NS), INVALID_STIMULUS_CODE)
+        self.assertEqual(miil.current_action, "no_stimulus")
         self.assertEqual(miil.code_at(8 * NS), IDLE_STIMULUS_CODE)
 
     def test_codebook_is_frozen_for_active_capture(self) -> None:
@@ -108,20 +111,8 @@ class MIILControllerTests(unittest.TestCase):
         self.assertEqual(metadata["boundary_method"], "shared_host_monotonic_clock")
         self.assertNotIn("row_counts", repr(metadata))
         self.assertEqual(metadata["intervals"][1]["stimulus_code"], 1)
+        self.assertNotIn("offline_processing_recommendations", metadata)
 
-    def test_pause_resume_preserves_current_instruction(self) -> None:
-        miil = MIILController(self.actions)
-        miil.start(at(0.0))
-        miil.select_action(2, at(2.0))
-        miil.pause(at(4.0))
-
-        self.assertEqual(miil.state, MIILState.PAUSED)
-        self.assertEqual(miil.current_code, 2)
-        self.assertEqual(miil.current_elapsed_s(), 2.0)
-
-        miil.resume(at(6.0))
-        self.assertEqual(miil.state, MIILState.RUNNING)
-        self.assertEqual(miil.current_code, 2)
 
 
 if __name__ == "__main__":

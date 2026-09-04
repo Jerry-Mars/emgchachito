@@ -25,7 +25,6 @@ DROP_STIMULUS_ACTION = "drop_stimulus"
 class MIILState(str, Enum):
     IDLE = "idle"
     RUNNING = "running"
-    PAUSED = "paused"
     STOPPED = "stopped"
 
 
@@ -109,7 +108,6 @@ class MIILController:
 
     def __init__(self, actions: Iterable[MIILAction] = DEFAULT_MIIL_ACTIONS) -> None:
         self._actions: tuple[MIILAction, ...] = ()
-        self._capture_actions: tuple[MIILAction, ...] = ()
         self._intervals: list[MIILInterval] = []
         self._last_boundary: MIILBoundary | None = None
         self.state = MIILState.IDLE
@@ -139,11 +137,7 @@ class MIILController:
     @property
     def current_action(self) -> str:
         interval = self.current_interval
-        if interval is None:
-            return NO_STIMULUS_ACTION
-        if interval.effective_code == INVALID_STIMULUS_CODE:
-            return DROP_STIMULUS_ACTION
-        return interval.action
+        return NO_STIMULUS_ACTION if interval is None else interval.action
 
     @property
     def current_label(self) -> str:
@@ -158,14 +152,12 @@ class MIILController:
         interval = self.current_interval
         if interval is None:
             return 0.0
-        if current_monotonic_ns is None or self.state == MIILState.PAUSED:
-            current_monotonic_ns = self._current_monotonic_ns()
         return interval.duration_s(current_monotonic_ns)
 
     def configure_actions(self, actions: Iterable[MIILAction]) -> str | None:
         """Validate and apply the action codebook while MIIL is inactive."""
 
-        if self.state in (MIILState.RUNNING, MIILState.PAUSED):
+        if self.state is MIILState.RUNNING:
             return "Stop MIIL before changing its actions."
 
         validated: list[MIILAction] = []
@@ -201,34 +193,23 @@ class MIILController:
             return "MIIL action list cannot be empty."
 
         self._actions = tuple(validated)
-        if not self._intervals:
-            self._capture_actions = self._actions
         return None
 
-    def apply_actions(self, actions: Iterable[MIILAction]) -> str | None:
-        """Compatibility alias for callers migrating from fundamental MIIL."""
-
-        return self.configure_actions(actions)
-
     def reset_timeline(self) -> str | None:
-        if self.state in (MIILState.RUNNING, MIILState.PAUSED):
+        if self.state is MIILState.RUNNING:
             return "Stop MIIL before resetting its timeline."
         self.state = MIILState.IDLE
         self._intervals = []
         self._last_boundary = None
-        self._capture_actions = self._actions
         return None
 
     def start(self, boundary: MIILBoundary) -> str:
         if self.state == MIILState.RUNNING:
             return "MIIL is already running."
-        if self.state == MIILState.PAUSED:
-            return self.resume(boundary)
         if not self._actions:
             return "MIIL action list is empty."
 
         self._intervals = []
-        self._capture_actions = self._actions
         self._last_boundary = boundary
         self.state = MIILState.RUNNING
         self._open_interval(NO_STIMULUS_ACTION, "No Stimulus", IDLE_STIMULUS_CODE, boundary)
@@ -237,7 +218,7 @@ class MIILController:
     def select_action(self, code: int, boundary: MIILBoundary) -> str:
         if self.state != MIILState.RUNNING:
             return "MIIL is not running."
-        action = next((item for item in self._capture_actions if item.code == code), None)
+        action = next((item for item in self._actions if item.code == code), None)
         if action is None:
             return f"MIIL action code {code} is not configured."
         current = self.current_interval
@@ -286,24 +267,9 @@ class MIILController:
         self._last_boundary = normalized
         return f"Current '{interval.label}' interval was marked drop_stimulus from its beginning."
 
-    def pause(self, boundary: MIILBoundary) -> str:
-        if self.state != MIILState.RUNNING:
-            return "MIIL is not running."
-        self._last_boundary = self._normalized_boundary(boundary)
-        self.state = MIILState.PAUSED
-        return "MIIL paused; the current action is preserved."
-
-    def resume(self, boundary: MIILBoundary | None = None) -> str:
-        if self.state != MIILState.PAUSED:
-            return "MIIL is not paused."
-        if boundary is not None:
-            self._last_boundary = self._normalized_boundary(boundary)
-        self.state = MIILState.RUNNING
-        return "MIIL resumed with the same action."
-
     def stop(self, boundary: MIILBoundary) -> str:
-        if self.state not in (MIILState.RUNNING, MIILState.PAUSED):
-            return "MIIL is not active."
+        if self.state is not MIILState.RUNNING:
+            return "MIIL is not running."
         self._close_current(self._normalized_boundary(boundary), "stopped")
         self.state = MIILState.STOPPED
         return "MIIL stopped."
@@ -319,12 +285,8 @@ class MIILController:
         return IDLE_STIMULUS_CODE
 
     def event_log_rows(self) -> list[dict[str, object]]:
-        current = self.current_interval
         rows: list[dict[str, object]] = []
         for interval in self._intervals:
-            status = interval.status
-            if interval == current and self.state == MIILState.PAUSED and status != "dropped":
-                status = "paused"
             rows.append(
                 {
                     "event_index": interval.event_index,
@@ -337,7 +299,7 @@ class MIILController:
                     "start_unix_ns": interval.start.host_unix_ns,
                     "end_unix_ns": None if interval.end is None else interval.end.host_unix_ns,
                     "duration_s": interval.duration_s(self._current_monotonic_ns()),
-                    "status": status,
+                    "status": interval.status,
                     "drop_pressed_at_monotonic_ns": interval.drop_pressed_at_monotonic_ns,
                 }
             )
@@ -358,16 +320,9 @@ class MIILController:
             },
             "codebook": [
                 {"action": action.action, "label": action.label, "stimulus_code": action.code}
-                for action in (self._capture_actions if self._intervals else self._actions)
+                for action in self._actions
             ],
             "intervals": self.event_log_rows(),
-            "offline_processing_recommendations": {
-                "apply_at_analysis_time": True,
-                "exclude_codes": [INVALID_STIMULUS_CODE, IDLE_STIMULUS_CODE],
-                "action_start_trim_s": 1.0,
-                "action_end_trim_s_range": [0.5, 1.0],
-                "windows_must_not_cross_interval_boundaries": True,
-            },
         }
 
     def _open_interval(self, action: str, label: str, code: int, boundary: MIILBoundary) -> None:

@@ -410,8 +410,6 @@ class IntegratedSaveMIILPanel:
         self.stop_tag = f"{tag_prefix}.stop"
         self.save_tag = f"{tag_prefix}.save"
         self.discard_tag = f"{tag_prefix}.discard"
-        self.pause_tag = f"{tag_prefix}.pause"
-        self.resume_tag = f"{tag_prefix}.resume"
         self.status_tag = f"{tag_prefix}.status"
         self.current_tag = f"{tag_prefix}.current"
         self.rows_tag = f"{tag_prefix}.rows"
@@ -433,7 +431,7 @@ class IntegratedSaveMIILPanel:
             "Acquisition/Plot run continuously. Start/Stop controls the candidate Recorder + MIIL session."
         )
         dpg.add_text(
-            "Stop freezes staged data; Save commits it; Discard deletes it. Pause affects MIIL only."
+            "Stop freezes staged data; Save commits it; Discard deletes it."
         )
 
         dpg.add_separator()
@@ -465,12 +463,6 @@ class IntegratedSaveMIILPanel:
             )
             dpg.add_button(
                 label="Stop Session", tag=self.stop_tag, callback=self._on_stop, width=145
-            )
-            dpg.add_button(
-                label="Pause MIIL", tag=self.pause_tag, callback=self._on_pause, width=115
-            )
-            dpg.add_button(
-                label="Resume MIIL", tag=self.resume_tag, callback=self._on_resume, width=115
             )
         with dpg.group(horizontal=True):
             dpg.add_button(
@@ -601,7 +593,6 @@ class IntegratedSaveMIILPanel:
         recording = self.session_state is SessionState.RECORDING
         pending = self.session_state is SessionState.PENDING_SAVE
         running = self.miil.state is MIILState.RUNNING
-        paused = self.miil.state is MIILState.PAUSED
 
         dpg.configure_item(self.directory_tag, enabled=idle)
         dpg.configure_item(self.format_tag, enabled=idle)
@@ -610,8 +601,6 @@ class IntegratedSaveMIILPanel:
         dpg.configure_item(self.stop_tag, enabled=recording)
         dpg.configure_item(self.save_tag, enabled=pending)
         dpg.configure_item(self.discard_tag, enabled=pending)
-        dpg.configure_item(self.pause_tag, enabled=recording and running)
-        dpg.configure_item(self.resume_tag, enabled=recording and paused)
 
         dpg.configure_item(self.add_action_tag, enabled=idle)
         dpg.configure_item(self.apply_actions_tag, enabled=idle)
@@ -638,7 +627,7 @@ class IntegratedSaveMIILPanel:
                 print(f"Pending recording preserved in staging: {self._staging_root}")
             except Exception as exc:
                 print(f"Failed to finalize pending recording during shutdown: {exc}")
-        elif self.miil.state in (MIILState.RUNNING, MIILState.PAUSED):
+        elif self.miil.state is MIILState.RUNNING:
             self.miil.stop(capture_host_boundary())
 
     def _on_start(self, *_args) -> None:
@@ -698,7 +687,7 @@ class IntegratedSaveMIILPanel:
         self.refresh(force_history=True)
 
     def _stop_recording_to_pending(self) -> None:
-        if self.miil.state in (MIILState.RUNNING, MIILState.PAUSED):
+        if self.miil.state is MIILState.RUNNING:
             self.miil.stop(capture_host_boundary())
         output = self.recorder.stop()
         if output is not None:
@@ -781,16 +770,6 @@ class IntegratedSaveMIILPanel:
         except Exception as exc:
             self._last_message = f"Discard failed: {exc}"
         self.refresh(force_history=True)
-
-    def _on_pause(self, *_args) -> None:
-        if self.session_state is SessionState.RECORDING:
-            self._last_message = self.miil.pause(capture_host_boundary())
-        self.refresh()
-
-    def _on_resume(self, *_args) -> None:
-        if self.session_state is SessionState.RECORDING:
-            self._last_message = self.miil.resume(capture_host_boundary())
-        self.refresh()
 
     def _on_no_stimulus(self, *_args) -> None:
         if self.session_state is SessionState.RECORDING:
