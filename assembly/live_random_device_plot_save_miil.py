@@ -1371,6 +1371,25 @@ def main() -> None:
             )
             session_panel.build()
 
+        device_failure_alert_tag = "assembly.random_device_plot_save_miil.device_failure_alert"
+        device_failure_text_tag = "assembly.random_device_plot_save_miil.device_failure_text"
+        with dpg.window(
+            label="Device Offline",
+            tag=device_failure_alert_tag,
+            modal=True,
+            show=False,
+            no_resize=True,
+            width=520,
+            height=175,
+        ):
+            dpg.add_text("An acquisition device has gone offline.")
+            dpg.add_text("", tag=device_failure_text_tag, wrap=480)
+            dpg.add_button(
+                label="Acknowledge",
+                callback=lambda *_: dpg.configure_item(device_failure_alert_tag, show=False),
+                width=120,
+            )
+
         dpg.create_viewport(
             title="Random Device Plot + Save + MIIL",
             width=1760,
@@ -1381,12 +1400,20 @@ def main() -> None:
         dpg.setup_dearpygui()
         dpg.show_viewport()
 
+        notified_failures: set[str] = set()
         while dpg.is_dearpygui_running():
             for pump in pumps:
                 pump.drain(max_items=MAX_RECORDS_PER_PUMP_PER_FRAME)
 
-            if group.failures():
-                break
+            failures = group.failures()
+            new_failures = tuple(worker_id for worker_id in failures if worker_id not in notified_failures)
+            if new_failures:
+                notified_failures.update(new_failures)
+                dpg.set_value(
+                    device_failure_text_tag,
+                    "\n".join(f"{worker_id}: {failures[worker_id]}" for worker_id in new_failures),
+                )
+                dpg.configure_item(device_failure_alert_tag, show=True)
 
             plot_state.refresh(provider)
             session_panel.refresh()
