@@ -417,16 +417,67 @@ class FatigueEvaluationController:
 
     def metadata_snapshot(self) -> dict[str, object]:
         return {
+            "schema": "assembly.experiment.fatigue_evaluation",
+            "schema_version": 1,
             "paradigm": FATIGUE_EVALUATION_PARADIGM_ID,
             "paradigm_name": FATIGUE_EVALUATION_PARADIGM_NAME,
             "state": self.state.value,
-            "boundary_method": "shared_host_monotonic_clock",
-            "term_code_semantics": "positive stimulus code equals term_number; 0=no_stimulus; -1=dropped term",
-            "term_end_semantics": {
-                "timer": "planned duration reached",
-                "manual_t": "T key manually ended a running term",
-                "drop": "term invalidated by drop",
-                "session_stop": "recording session stopped while term was running",
+            "alignment_semantics": {
+                "key": "host_monotonic_ns",
+                "unit": "ns",
+                "interval_convention": "[start, end)",
+                "membership_rule": "start_monotonic_ns <= sample.host_monotonic_ns < end_monotonic_ns",
+                "host_monotonic_ns": "host observation timestamp used as the canonical alignment clock",
+                "host_unix_ns": "host wall-clock observation timestamp for audit/reference",
+            },
+            "code_semantics": {
+                "planned_code": "original intended term code before invalidation",
+                "stimulus_code": "effective code used for offline alignment",
+                "no_stimulus": {
+                    "code": IDLE_STIMULUS_CODE,
+                    "meaning": "no active fatigue-evaluation term",
+                    "is_rest_label": False,
+                },
+                "dropped": {
+                    "code": INVALID_STIMULUS_CODE,
+                    "meaning": "whole term attempt was invalidated retrospectively",
+                },
+                "positive": "logical term number",
+            },
+            "status_semantics": {
+                "completed": "segment completed normally",
+                "dropped": "term attempt was explicitly invalidated and is not a valid completed trial",
+                "stopped": "segment was interrupted by session termination",
+                "running": "segment was still open when metadata was captured",
+            },
+            "term_semantics": {
+                "term_number": "logical sequential term identity",
+                "attempt": "execution attempt number for the same logical term; increments on retry",
+                "planned_duration_s": "configured term duration; null means open-ended",
+                "duration_s": "actual segment duration derived from recorded boundaries",
+                "end_method": {
+                    "timer": "planned duration reached",
+                    "manual_t": "T key ended the running term",
+                    "drop": "term attempt was invalidated",
+                    "session_stop": "recording session ended while the term was running",
+                },
+            },
+            "action_event_semantics": {
+                "type": "manual_point_event",
+                "trigger": "keyboard_q",
+                "meaning": "manual indication that one action occurred during the active term",
+                "timestamp_key": "host_monotonic_ns",
+                "changes_term_boundary": False,
+                "represents_action_duration": False,
+                "automatically_detected": False,
+            },
+            "cr10_semantics": {
+                "scale": "CR10",
+                "range": [1, 10],
+                "type": "post_term_subjective_fatigue_rating",
+                "applies_to": "completed_term",
+                "is_samplewise_label": False,
+                "null_meaning": "no CR10 rating was assigned to this term",
             },
             "cr10_reference": [
                 {"score": score, "description": description}

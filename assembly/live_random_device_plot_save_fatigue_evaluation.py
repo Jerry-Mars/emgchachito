@@ -877,7 +877,6 @@ class IntegratedSaveFatigueEvaluationPanel:
             else self._require_staging_root() / "fatigue_evaluation.json"
         )
         metadata = self.evaluation.metadata_snapshot()
-        metadata["alignment_key"] = "host_monotonic_ns"
         metadata["recording_format"] = session_format
         metadata["session_status"] = "saved" if final_output is not None else "pending_save"
         metadata["recording_output"] = None if final_output is None else str(final_output)

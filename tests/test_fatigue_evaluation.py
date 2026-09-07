@@ -162,7 +162,18 @@ class FatigueEvaluationControllerTests(unittest.TestCase):
         controller.stop_session(boundary(5.0))
 
         metadata = controller.metadata_snapshot()
+        self.assertEqual(metadata["schema"], "assembly.experiment.fatigue_evaluation")
+        self.assertEqual(metadata["schema_version"], 1)
         self.assertEqual(metadata["paradigm"], "fatigue_evaluation")
+        self.assertEqual(metadata["alignment_semantics"]["key"], "host_monotonic_ns")
+        self.assertEqual(metadata["alignment_semantics"]["interval_convention"], "[start, end)")
+        self.assertFalse(metadata["code_semantics"]["no_stimulus"]["is_rest_label"])
+        self.assertEqual(metadata["code_semantics"]["dropped"]["code"], -1)
+        self.assertEqual(metadata["action_event_semantics"]["type"], "manual_point_event")
+        self.assertEqual(metadata["action_event_semantics"]["trigger"], "keyboard_q")
+        self.assertEqual(metadata["cr10_semantics"]["applies_to"], "completed_term")
+        self.assertFalse(metadata["cr10_semantics"]["is_samplewise_label"])
+        self.assertEqual(metadata["term_semantics"]["end_method"]["manual_t"], "T key ended the running term")
         term_rows = [row for row in metadata["segments"] if row["kind"] == "term"]
         self.assertEqual(len(term_rows), 1)
         self.assertEqual(term_rows[0]["action_count"], 2)
