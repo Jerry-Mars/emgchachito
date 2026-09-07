@@ -433,6 +433,7 @@ class IntegratedSaveMIILPanel:
         self.path_tag = f"{tag_prefix}.path"
         self.pending_tag = f"{tag_prefix}.pending"
         self.config_status_tag = f"{tag_prefix}.config_status"
+        self.action_config_header_tag = f"{tag_prefix}.action_config_header"
         self.action_editor_tag = f"{tag_prefix}.action_editor"
         self.add_action_tag = f"{tag_prefix}.add_action"
         self.apply_actions_tag = f"{tag_prefix}.apply_actions"
@@ -497,23 +498,30 @@ class IntegratedSaveMIILPanel:
         dpg.add_text("", tag=self.pending_tag, wrap=720)
 
         dpg.add_separator()
-        dpg.add_text("MIIL Action Configuration")
-        dpg.add_text(
-            "Actions can be edited only while no recording is pending. Apply before Start."
-        )
-        with dpg.child_window(tag=self.action_editor_tag, width=-1, height=145, border=True):
-            pass
-        with dpg.group(horizontal=True):
-            dpg.add_button(
-                label="Add Action", tag=self.add_action_tag, callback=self._on_add_action, width=120
+        with dpg.collapsing_header(
+            label="MIIL Action Configuration",
+            tag=self.action_config_header_tag,
+            default_open=True,
+        ):
+            dpg.add_text(
+                "Actions can be edited only while no recording is pending. Apply before Start."
             )
-            dpg.add_button(
-                label="Apply Actions",
-                tag=self.apply_actions_tag,
-                callback=self._on_apply_actions,
-                width=120,
-            )
-        dpg.add_text("", tag=self.config_status_tag)
+            with dpg.child_window(tag=self.action_editor_tag, width=-1, height=145, border=True):
+                pass
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label="Add Action",
+                    tag=self.add_action_tag,
+                    callback=self._on_add_action,
+                    width=120,
+                )
+                dpg.add_button(
+                    label="Apply Actions",
+                    tag=self.apply_actions_tag,
+                    callback=self._on_apply_actions,
+                    width=120,
+                )
+            dpg.add_text("", tag=self.config_status_tag)
 
         dpg.add_separator()
         dpg.add_text("MIIL Operator Console")
@@ -702,6 +710,7 @@ class IntegratedSaveMIILPanel:
             boundary = capture_host_boundary()
             message = self.miil.start(boundary)
             self._last_message = f"{message} Candidate recording started."
+            self._set_action_configuration_open(False)
         except Exception as exc:
             if self.recorder.is_recording:
                 self.recorder.stop()
@@ -824,11 +833,20 @@ class IntegratedSaveMIILPanel:
             self._last_message = self.miil.select_action(int(code), capture_host_boundary())
         self.refresh(force_history=True)
 
+    def _set_action_configuration_open(self, is_open: bool) -> None:
+        if not dpg.does_item_exist(self.action_config_header_tag):
+            return
+        try:
+            dpg.set_value(self.action_config_header_tag, bool(is_open))
+        except (RuntimeError, SystemError):
+            pass
+
     def _on_add_action(self, *_args) -> None:
         if self.session_state is not SessionState.IDLE:
             self._last_message = "Resolve the current session before editing MIIL actions."
             self.refresh()
             return
+        self._sync_editor_values()
         used = {action.code for action in self._editor_actions}
         code = 1
         while code in used:
