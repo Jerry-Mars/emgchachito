@@ -37,6 +37,7 @@ from assembly.acquisition.serial.w2_worker import SerialW2Worker, W2Record, W2Se
 from assembly.experiment.fatigue_evaluation import (
     CR10_REFERENCE,
     FatigueEvaluationController,
+    FatigueEvaluationSegment,
     FatigueEvaluationState,
     FatigueEvaluationTermSpec,
     capture_host_boundary,
@@ -115,6 +116,7 @@ class IntegratedSaveFatigueEvaluationPanel:
         self._default_session_name = self._normalize_session_name(default_session_name)
         self._last_message = "Ready."
         self._history_signature: tuple[tuple[object, ...], ...] = ()
+        self._term_overview_signature: tuple[tuple[object, ...], ...] = ()
         self._prepared_term_number: int | None = None
         self._last_progress_theme: str | None = None
 
@@ -132,9 +134,11 @@ class IntegratedSaveFatigueEvaluationPanel:
         self.save_tag = f"{tag_prefix}.save"
         self.discard_tag = f"{tag_prefix}.discard"
         self.status_tag = f"{tag_prefix}.status"
+        self.overview_tag = f"{tag_prefix}.overview"
         self.rows_tag = f"{tag_prefix}.rows"
         self.path_tag = f"{tag_prefix}.path"
         self.pending_tag = f"{tag_prefix}.pending"
+        self.session_output_header_tag = f"{tag_prefix}.session_output_header"
 
         self.term_header_tag = f"{tag_prefix}.term_header"
         self.term_number_tag = f"{tag_prefix}.term_number"
@@ -147,11 +151,16 @@ class IntegratedSaveFatigueEvaluationPanel:
         self.current_tag = f"{tag_prefix}.current"
         self.elapsed_tag = f"{tag_prefix}.elapsed"
         self.action_count_tag = f"{tag_prefix}.action_count"
+        self.action_distribution_tag = f"{tag_prefix}.action_distribution"
         self.progress_tag = f"{tag_prefix}.progress"
         self.drop_tag = f"{tag_prefix}.drop"
 
+        self.rating_header_tag = f"{tag_prefix}.rating_header"
         self.rating_summary_tag = f"{tag_prefix}.rating_summary"
         self.rating_buttons_tag = f"{tag_prefix}.rating_buttons"
+        self.term_overview_header_tag = f"{tag_prefix}.term_overview_header"
+        self.term_overview_tag = f"{tag_prefix}.term_overview"
+        self.detailed_history_header_tag = f"{tag_prefix}.detailed_history_header"
         self.latest_history_tag = f"{tag_prefix}.latest_history"
         self.history_tag = f"{tag_prefix}.history"
         self.discard_modal_tag = f"{tag_prefix}.discard_modal"
@@ -160,157 +169,64 @@ class IntegratedSaveFatigueEvaluationPanel:
         self.running_theme_tag = f"{tag_prefix}.progress_theme.running"
 
     def build(self) -> None:
-        dpg.add_text("Recording Session + Term-Based Fatigue Evaluation")
-        dpg.add_text("Q records one action event. T ends any running term immediately.")
-        dpg.add_text("Timed terms also end automatically. Inter-term time remains No Stimulus.")
-
-        dpg.add_separator()
-        dpg.add_text("Session Output")
-        dpg.add_input_text(
-            label="Save root",
-            tag=self.directory_tag,
-            default_value=self._default_directory,
-            width=500,
-        )
-        dpg.add_input_text(
-            label="Session name",
-            tag=self.session_name_tag,
-            default_value=self._default_session_name,
-            width=500,
-        )
-        dpg.add_combo(
-            ("HDF5", "CSV"),
-            label="Format",
-            tag=self.format_tag,
-            default_value="HDF5",
-            width=160,
-        )
-        dpg.add_text("", tag=self.preview_tag, wrap=720)
+        dpg.add_text("FATIGUE EVALUATION")
         with dpg.group(horizontal=True):
-            dpg.add_button(
-                label="Start Session",
-                tag=self.start_session_tag,
-                callback=self._on_start_session,
-                width=145,
-            )
-            dpg.add_button(
-                label="Stop Session",
-                tag=self.stop_session_tag,
-                callback=self._on_stop_session,
-                width=145,
-            )
-        with dpg.group(horizontal=True):
+            dpg.add_button(label="Start Session", tag=self.start_session_tag, callback=self._on_start_session, width=145)
+            dpg.add_button(label="Stop Session", tag=self.stop_session_tag, callback=self._on_stop_session, width=145)
             dpg.add_button(label="Save Session", tag=self.save_tag, callback=self._on_save, width=145)
-            dpg.add_button(
-                label="Discard Session",
-                tag=self.discard_tag,
-                callback=self._on_discard,
-                width=145,
-            )
+            dpg.add_button(label="Discard Session", tag=self.discard_tag, callback=self._on_discard, width=145)
         dpg.add_text("", tag=self.status_tag)
-        dpg.add_text("", tag=self.rows_tag)
-        dpg.add_text("", tag=self.path_tag, wrap=720)
-        dpg.add_text("", tag=self.pending_tag, wrap=720)
+        dpg.add_text("", tag=self.overview_tag)
 
         dpg.add_separator()
-        with dpg.collapsing_header(
-            label="Next Term Configuration",
-            tag=self.term_header_tag,
-            default_open=True,
-        ):
-            dpg.add_text("Configure the next term after each completed term. Defaults inherit the previous term.")
-            dpg.add_text("Term: 1", tag=self.term_number_tag)
-            dpg.add_input_text(
-                label="Term name",
-                tag=self.term_name_tag,
-                default_value=DEFAULT_TERM_NAME,
-                width=360,
-            )
-            dpg.add_checkbox(
-                label="Use planned duration",
-                tag=self.use_duration_tag,
-                default_value=True,
-                callback=self._on_duration_mode_changed,
-            )
-            dpg.add_input_float(
-                label="Duration (s)",
-                tag=self.term_duration_tag,
-                default_value=DEFAULT_TERM_DURATION_S,
-                width=150,
-                min_value=0.01,
-                min_clamped=True,
-                format="%.2f",
-            )
-            with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label="Start Term",
-                    tag=self.start_term_tag,
-                    callback=self._on_start_term,
-                    width=145,
-                )
-                dpg.add_button(
-                    label="Finish Protocol",
-                    tag=self.finish_protocol_tag,
-                    callback=self._on_finish_protocol,
-                    width=145,
-                )
-
-        dpg.add_separator()
-        dpg.add_text("Participant Console")
-        dpg.add_text("Q = action event | T = end term")
+        dpg.add_text("CURRENT TERM")
         dpg.add_text("", tag=self.current_tag)
+        dpg.add_progress_bar(default_value=0.0, tag=self.progress_tag, width=-1, overlay="NO STIMULUS")
         dpg.add_text("", tag=self.elapsed_tag)
         dpg.add_text("", tag=self.action_count_tag)
-        dpg.add_progress_bar(
-            default_value=0.0,
-            tag=self.progress_tag,
-            width=-1,
-            overlay="NO STIMULUS",
-        )
-        dpg.add_button(
-            label="Drop Current / Previous Term (-1)",
-            tag=self.drop_tag,
-            callback=self._on_drop,
-            width=260,
-        )
+        dpg.add_text("", tag=self.action_distribution_tag)
+        dpg.add_button(label="Drop Term (-1)", tag=self.drop_tag, callback=self._on_drop, width=145)
 
-        dpg.add_separator()
-        dpg.add_text("CR10 Rating for Previous Term")
-        dpg.add_text("Select a score after a valid completed term. Rating is optional.")
-        dpg.add_text("No completed term awaiting rating.", tag=self.rating_summary_tag, wrap=720)
-        with dpg.child_window(tag=self.rating_buttons_tag, width=-1, height=250, border=True):
-            for score, description in CR10_REFERENCE:
-                with dpg.group(horizontal=True):
-                    dpg.add_button(
-                        label=str(score),
-                        user_data=score,
-                        callback=self._on_cr10,
-                        width=45,
-                    )
-                    dpg.add_text(description)
+        with dpg.collapsing_header(label="Next Term", tag=self.term_header_tag, default_open=True):
+            dpg.add_text("Term: 1", tag=self.term_number_tag)
+            dpg.add_input_text(label="Term name", tag=self.term_name_tag, default_value=DEFAULT_TERM_NAME, width=360)
+            dpg.add_checkbox(label="Use planned duration", tag=self.use_duration_tag, default_value=True, callback=self._on_duration_mode_changed)
+            dpg.add_input_float(label="Duration (s)", tag=self.term_duration_tag, default_value=DEFAULT_TERM_DURATION_S, width=150, min_value=0.01, min_clamped=True, format="%.2f")
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Start Term", tag=self.start_term_tag, callback=self._on_start_term, width=145)
+                dpg.add_button(label="Finish Protocol", tag=self.finish_protocol_tag, callback=self._on_finish_protocol, width=145)
 
-        dpg.add_text("Term History")
-        dpg.add_text("Latest Event: -", tag=self.latest_history_tag)
-        with dpg.child_window(tag=self.history_tag, width=-1, height=170, horizontal_scrollbar=True):
-            pass
+        with dpg.collapsing_header(label="Previous Term Evaluation", tag=self.rating_header_tag, default_open=False):
+            dpg.add_text("No valid completed term awaiting rating.", tag=self.rating_summary_tag, wrap=720)
+            with dpg.child_window(tag=self.rating_buttons_tag, width=-1, height=235, border=True):
+                for score, description in CR10_REFERENCE:
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label=str(score), user_data=score, callback=self._on_cr10, width=45)
+                        dpg.add_text(description)
 
-        with dpg.window(
-            label="Confirm Discard",
-            tag=self.discard_modal_tag,
-            modal=True,
-            show=False,
-            no_resize=True,
-            width=430,
-            height=145,
-        ):
+        with dpg.collapsing_header(label="Term History Overview", tag=self.term_overview_header_tag, default_open=True):
+            with dpg.child_window(tag=self.term_overview_tag, width=-1, height=190, horizontal_scrollbar=True):
+                pass
+
+        with dpg.collapsing_header(label="Session Output / Advanced", tag=self.session_output_header_tag, default_open=False):
+            dpg.add_input_text(label="Save root", tag=self.directory_tag, default_value=self._default_directory, width=500)
+            dpg.add_input_text(label="Session name", tag=self.session_name_tag, default_value=self._default_session_name, width=500)
+            dpg.add_combo(("HDF5", "CSV"), label="Format", tag=self.format_tag, default_value="HDF5", width=160)
+            dpg.add_text("", tag=self.preview_tag, wrap=720)
+            dpg.add_text("", tag=self.rows_tag)
+            dpg.add_text("", tag=self.path_tag, wrap=720)
+            dpg.add_text("", tag=self.pending_tag, wrap=720)
+
+        with dpg.collapsing_header(label="Detailed Event History", tag=self.detailed_history_header_tag, default_open=False):
+            dpg.add_text("Latest Event: -", tag=self.latest_history_tag)
+            with dpg.child_window(tag=self.history_tag, width=-1, height=170, horizontal_scrollbar=True):
+                pass
+
+        with dpg.window(label="Confirm Discard", tag=self.discard_modal_tag, modal=True, show=False, no_resize=True, width=430, height=145):
             dpg.add_text("Delete this pending recording from staging? This cannot be undone.")
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Confirm Discard", callback=self._confirm_discard, width=150)
-                dpg.add_button(
-                    label="Cancel",
-                    callback=lambda *_: dpg.configure_item(self.discard_modal_tag, show=False),
-                    width=100,
-                )
+                dpg.add_button(label="Cancel", callback=lambda *_: dpg.configure_item(self.discard_modal_tag, show=False), width=100)
 
         self._build_progress_themes()
         self._build_keyboard_handlers()
@@ -326,12 +242,12 @@ class IntegratedSaveFatigueEvaluationPanel:
             if update_message:
                 self._last_message = update_message
                 self._prepare_term_editor(force=True)
+                self._set_rating_open(True)
                 force_history = True
 
         dpg.set_value(
             self.status_tag,
-            f"Session: {self.session_state.value.upper()} | Recorder: {self.recorder.state.value.upper()} | "
-            f"Evaluation: {self.evaluation.state.value.upper()} | {self._last_message}",
+            self._last_message,
         )
         dpg.set_value(self.rows_tag, f"Rows written: {self.recorder.rows_written}")
         dpg.set_value(self.preview_tag, self._output_preview_text())
@@ -361,8 +277,10 @@ class IntegratedSaveFatigueEvaluationPanel:
             )
         dpg.set_value(self.pending_tag, pending_text)
 
+        self._refresh_overview()
         self._refresh_participant_console()
         self._refresh_rating_summary()
+        self._refresh_term_history_overview()
         self._refresh_control_states()
         self._refresh_history(force=force_history)
 
@@ -540,6 +458,7 @@ class IntegratedSaveFatigueEvaluationPanel:
         try:
             spec = self._term_spec_from_window()
             self._last_message = self.evaluation.start_term(spec, capture_host_boundary())
+            self._set_rating_open(False)
         except Exception as exc:
             self._last_message = f"Start term failed: {exc}"
         self.refresh(force_history=True)
@@ -566,6 +485,7 @@ class IntegratedSaveFatigueEvaluationPanel:
         if self.evaluation.state is FatigueEvaluationState.RUNNING:
             self._last_message = self.evaluation.end_term_manual(capture_host_boundary())
             self._prepare_term_editor(force=True)
+            self._set_rating_open(True)
             self.refresh(force_history=True)
 
     def _on_drop(self, *_args) -> None:
@@ -577,6 +497,7 @@ class IntegratedSaveFatigueEvaluationPanel:
                 FatigueEvaluationState.EVALUATING,
             }:
                 self._prepare_term_editor(force=True)
+                self._set_rating_open(False)
         self.refresh(force_history=True)
 
     def _on_cr10(self, _sender, _app_data, score) -> None:
@@ -639,6 +560,93 @@ class IntegratedSaveFatigueEvaluationPanel:
     # UI refresh
     # ------------------------------------------------------------------
 
+    def _refresh_overview(self) -> None:
+        terms = [segment for segment in self.evaluation.segments if segment.kind == "term"]
+        completed = [segment for segment in terms if segment.status == "completed"]
+        current = self.evaluation.current_term
+        visible_terms = [*completed]
+        if current is not None:
+            visible_terms.append(current)
+        total_actions = sum(segment.action_count for segment in visible_terms)
+        current_text = "-" if current is None else f"TERM {current.term_number}"
+        current_actions = 0 if current is None else current.action_count
+        previous = next(
+            (segment for segment in reversed(completed) if segment is not current),
+            None,
+        )
+        previous_cr10 = "-" if previous is None or previous.cr10_score is None else str(previous.cr10_score)
+        dpg.set_value(
+            self.overview_tag,
+            f"Terms completed: {len(completed)}    Current: {current_text}    "
+            f"Total actions: {total_actions}    Current actions: {current_actions}    "
+            f"CR10 previous: {previous_cr10}",
+        )
+
+    @staticmethod
+    def _action_distribution_strip(
+        term: FatigueEvaluationSegment,
+        *,
+        current_monotonic_ns: int | None = None,
+        width: int = 36,
+    ) -> str:
+        if width < 4:
+            width = 4
+        if term.end is not None:
+            span_s = term.duration_s()
+        elif term.planned_duration_s is not None:
+            span_s = term.planned_duration_s
+        else:
+            span_s = term.duration_s(current_monotonic_ns)
+        if span_s <= 0:
+            return "|" + " " * width + "|"
+        bins = [0] * width
+        for event in term.action_events:
+            relative_s = (event.host_monotonic_ns - term.start_monotonic_ns) / 1e9
+            fraction = min(0.999999, max(0.0, relative_s / span_s))
+            bins[min(width - 1, int(fraction * width))] += 1
+        body = "".join(" " if count == 0 else "*" if count == 1 else "#" for count in bins)
+        return f"|{body}|"
+
+    def _refresh_term_history_overview(self) -> None:
+        terms = [
+            segment
+            for segment in self.evaluation.segments
+            if segment.kind == "term" and segment.status == "completed"
+        ]
+        signature = tuple(
+            (
+                term.event_index,
+                term.status,
+                term.end_monotonic_ns,
+                term.action_count,
+                term.cr10_score,
+            )
+            for term in terms
+        )
+        if signature == self._term_overview_signature:
+            return
+        self._term_overview_signature = signature
+        dpg.delete_item(self.term_overview_tag, children_only=True)
+        if not terms:
+            dpg.add_text("No term data yet.", parent=self.term_overview_tag)
+            return
+        dpg.add_text(
+            "Term   Duration    Action distribution                         Count  CR10",
+            parent=self.term_overview_tag,
+        )
+        now_ns = time.perf_counter_ns()
+        for term in terms:
+            duration = term.duration_s(now_ns if term.status == "running" else None)
+            cr10 = "-" if term.cr10_score is None else str(term.cr10_score)
+            strip = self._action_distribution_strip(
+                term,
+                current_monotonic_ns=now_ns if term.status == "running" else None,
+            )
+            dpg.add_text(
+                f"T{term.term_number:<3}  {duration:>6.1f} s   {strip}   {term.action_count:>5}   {cr10:>4}",
+                parent=self.term_overview_tag,
+            )
+
     def _refresh_participant_console(self) -> None:
         now_ns = time.perf_counter_ns()
         state = self.evaluation.state
@@ -647,41 +655,43 @@ class IntegratedSaveFatigueEvaluationPanel:
             elapsed = self.evaluation.current_elapsed_s(now_ns)
             dpg.set_value(
                 self.current_tag,
-                f"RUNNING TERM {term.term_number} | {term.label} | attempt {term.attempt}",
+                f"TERM {term.term_number} | {term.label} | attempt {term.attempt}",
             )
             if term.planned_duration_s is None:
-                dpg.set_value(self.elapsed_tag, f"Elapsed: {elapsed:.1f} s | Open-ended | Press T to end")
+                dpg.set_value(self.elapsed_tag, f"Elapsed: {elapsed:.1f} s | Open-ended")
                 dpg.set_value(self.progress_tag, 0.0)
                 dpg.configure_item(self.progress_tag, overlay=f"OPEN-ENDED   {elapsed:.1f} s")
             else:
                 fraction = self.evaluation.progress_fraction(now_ns)
                 dpg.set_value(
                     self.elapsed_tag,
-                    f"Elapsed: {elapsed:.1f} / {term.planned_duration_s:.1f} s | T can end early",
+                    f"Elapsed: {elapsed:.1f} / {term.planned_duration_s:.1f} s",
                 )
                 dpg.set_value(self.progress_tag, fraction)
                 dpg.configure_item(
                     self.progress_tag,
                     overlay=f"TERM {term.term_number}   {elapsed:.1f} / {term.planned_duration_s:.1f} s",
                 )
-            dpg.set_value(self.action_count_tag, f"Q action events: {term.action_count}")
+            dpg.set_value(self.action_count_tag, f"Action events: {term.action_count}")
+            dpg.set_value(
+                self.action_distribution_tag,
+                self._action_distribution_strip(term, current_monotonic_ns=now_ns),
+            )
             self._bind_progress_theme(self.running_theme_tag)
             return
 
         self._bind_progress_theme(self.waiting_theme_tag)
         dpg.set_value(self.progress_tag, 0.0)
-        dpg.set_value(self.action_count_tag, "Q action events: -")
+        dpg.set_value(self.action_count_tag, "Action events: -")
+        dpg.set_value(self.action_distribution_tag, "")
         if state is FatigueEvaluationState.READY:
             dpg.set_value(self.current_tag, "NO STIMULUS / READY")
-            dpg.set_value(self.elapsed_tag, f"Configure and start term {self.evaluation.pending_term_number}.")
+            dpg.set_value(self.elapsed_tag, f"Next: TERM {self.evaluation.pending_term_number}")
             dpg.configure_item(self.progress_tag, overlay="NO STIMULUS - READY")
         elif state is FatigueEvaluationState.EVALUATING:
-            dpg.set_value(self.current_tag, "NO STIMULUS / INTER-TERM EVALUATION")
-            dpg.set_value(
-                self.elapsed_tag,
-                f"Rate the previous term, then start term {self.evaluation.pending_term_number} or finish.",
-            )
-            dpg.configure_item(self.progress_tag, overlay="NO STIMULUS - EVALUATE / CONFIGURE NEXT TERM")
+            dpg.set_value(self.current_tag, "NO STIMULUS / INTER-TERM")
+            dpg.set_value(self.elapsed_tag, f"Next: TERM {self.evaluation.pending_term_number}")
+            dpg.configure_item(self.progress_tag, overlay="NO STIMULUS - INTER-TERM")
         elif state is FatigueEvaluationState.COMPLETE:
             dpg.set_value(self.current_tag, "PROTOCOL COMPLETE")
             dpg.set_value(self.elapsed_tag, "Stop Session when ready.")
@@ -936,6 +946,13 @@ class IntegratedSaveFatigueEvaluationPanel:
         if dpg.does_item_exist(self.term_header_tag):
             try:
                 dpg.set_value(self.term_header_tag, bool(is_open))
+            except (RuntimeError, SystemError):
+                pass
+
+    def _set_rating_open(self, is_open: bool) -> None:
+        if dpg.does_item_exist(self.rating_header_tag):
+            try:
+                dpg.set_value(self.rating_header_tag, bool(is_open))
             except (RuntimeError, SystemError):
                 pass
 
